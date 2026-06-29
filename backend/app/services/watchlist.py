@@ -11,6 +11,8 @@ from pathlib import Path
 import polars as pl
 
 from app.config import settings
+from app.data_providers.local_projects_provider import realtime_records_from_df
+from app.data_providers.registry import get_provider
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.client import get_client
 
@@ -99,6 +101,21 @@ def fetch_quotes(symbols: list[str], capset: CapabilitySet, timeout_s: float = 8
 
     if not symbols:
         return []
+
+    from app.services import preferences
+    provider_name = preferences.get_realtime_data_provider()
+    if provider_name != "tickflow":
+        provider = get_provider(provider_name)
+        df = provider.get_realtime(symbols=symbols)
+        records = realtime_records_from_df(df)
+        return [
+            {
+                **row,
+                "price": row.get("last_price"),
+                "pct": row.get("change_pct"),
+            }
+            for row in records
+        ]
 
     tf = get_client()
     quotes: list[dict] = []

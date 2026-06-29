@@ -21,6 +21,8 @@ from collections.abc import Callable
 from datetime import date, datetime, timedelta
 
 from app.services import kline_sync
+from app.services import preferences as _prefs
+from app.services.local_universe import resolve_local_stock_universe
 from app.services.pipeline_jobs import job_store
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.repository import KlineRepository
@@ -39,6 +41,8 @@ def _invalidate(table: str | None = None) -> None:
 
 def _resolve_universe(capset: CapabilitySet) -> list[str]:
     """解析标的池 — 与 daily_pipeline 独立的副本。"""
+    if _prefs.get_daily_data_provider() != "tickflow":
+        return resolve_local_stock_universe()
     if capset.has(Cap.KLINE_DAILY_BATCH):
         try:
             from app.tickflow.pools import get_pool

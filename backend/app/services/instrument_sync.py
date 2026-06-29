@@ -13,6 +13,7 @@ from pathlib import Path
 
 import polars as pl
 
+from app.data_providers.registry import get_provider
 from app.tickflow.client import get_client
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,20 @@ def sync_instruments(data_dir: Path) -> int:
 
     返回写入的行数。
     """
+    from app.services import preferences
+    provider_name = preferences.get_daily_data_provider()
+    if provider_name != "tickflow":
+        provider = get_provider(provider_name)
+        df = provider.get_instruments("stock")
+        if df.is_empty():
+            logger.warning("本地 provider 标的维表为空: %s", provider_name)
+            return 0
+        out = data_dir / "instruments" / "instruments.parquet"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        df.write_parquet(out)
+        logger.info("instruments synced from %s: %d rows → %s", provider_name, df.height, out)
+        return df.height
+
     tf = get_client()
     all_rows: list[dict] = []
 

@@ -23,6 +23,7 @@ from PyInstaller.utils.hooks import (
 )
 
 _IS_MACOS = sys.platform == "darwin"
+_IS_WINDOWS = sys.platform == "win32"
 
 block_cipher = None
 
@@ -31,6 +32,11 @@ ROOT = Path(SPECPATH).parent
 FRONTEND_DIST = str(ROOT / "frontend" / "dist")
 TIERS_YAML = str(ROOT / "tiers.yaml")
 BUILTIN_STRATEGIES = str(ROOT / "backend" / "app" / "strategy" / "builtin")
+SEED_FILES = (
+    (ROOT / "data" / "instruments" / "instruments.parquet", "seed_data/instruments"),
+    (ROOT / "data" / "instruments_index" / "instruments_index.parquet", "seed_data/instruments_index"),
+    (ROOT / "data" / "instruments_etf" / "instruments_etf.parquet", "seed_data/instruments_etf"),
+)
 # 图标按平台选: Windows 用 .ico, macOS 用 .icns (PyInstaller 对 .ico 在
 # mac 上静默忽略, 不换格式 Dock/Finder 会显示通用图标)。两者都由
 # packaging/generate_icon.py 一并生成。
@@ -42,11 +48,35 @@ datas = []
 binaries = []
 hiddenimports = []
 
-for pkg in ("polars", "pyarrow", "duckdb", "fastexcel"):
-    d, b, h = collect_all(pkg)
+def _keep_runtime_module(module_name: str) -> bool:
+    """PyInstaller 子模块过滤：保留运行时代码，排除测试和示例。"""
+    blocked_parts = ("tests", "testing", "test", "benchmarks", "examples", "conftest")
+    return not any(part in module_name.split(".") for part in blocked_parts)
+
+
+def _collect_runtime_package(pkg: str) -> None:
+    """收集带原生库的数据依赖，同时过滤测试目录以缩短桌面版冷启动。"""
+    global datas, binaries, hiddenimports
+
+    d, b, h = collect_all(
+        pkg,
+        filter_submodules=_keep_runtime_module,
+        exclude_datas=[
+            "**/tests/**",
+            "**/testing/**",
+            "**/test/**",
+            "**/benchmarks/**",
+            "**/examples/**",
+            "**/conftest.py",
+        ],
+    )
     datas += d
     binaries += b
     hiddenimports += h
+
+
+for pkg in ("polars", "pyarrow", "duckdb", "fastexcel"):
+    _collect_runtime_package(pkg)
 
 # polars-runtime-32 (rtcompat 兼容内核): release.yml 用 --extra legacy-cpu 安装。
 # 它是独立的伴侣二进制包 (含 .pyd/.so), 与 polars 主包分开发布,
@@ -62,17 +92,34 @@ except Exception:
     pass
 
 # polars 新 ABI 运行时目录 (_polars_runtime_32) 需显式收集子模块
-hiddenimports += collect_submodules("polars")
+hiddenimports += collect_submodules("polars", filter=_keep_runtime_module)
 
 # ── pywebview 平台后端 (动态导入, PyInstaller 默认抓不到) ────────────
-hiddenimports += collect_submodules("webview")
-hiddenimports += collect_submodules("webview.platforms")
+hiddenimports += collect_submodules(
+    "webview",
+    filter=lambda name: _keep_runtime_module(name) and not name.startswith(
+        ("webview.platforms.android", "webview.platforms.cocoa", "webview.platforms.gtk", "webview.platforms.qt")
+    ),
+)
+if _IS_WINDOWS:
+    hiddenimports += [
+        "webview.platforms.win32",
+        "webview.platforms.winforms",
+        "webview.platforms.edgechromium",
+        "webview.platforms.mshtml",
+    ]
 
 # ── 系统通知后端 (winotify/plyer 按平台动态导入) ─────────────────────
-if sys.platform == "win32":
+if _IS_WINDOWS:
     hiddenimports += collect_submodules("winotify")
-hiddenimports += collect_submodules("plyer")
-hiddenimports += collect_submodules("plyer.platforms")
+    hiddenimports += collect_submodules(
+        "plyer",
+        filter=lambda name: _keep_runtime_module(name) and not name.startswith(
+            ("plyer.platforms.android", "plyer.platforms.ios", "plyer.platforms.linux", "plyer.platforms.macosx")
+        ),
+    )
+else:
+    hiddenimports += collect_submodules("plyer", filter=_keep_runtime_module)
 
 # ── uvicorn 动态导入的模块 (loop/protocol/logging 按字符串加载) ──────
 hiddenimports += [
@@ -117,6 +164,10 @@ datas += [(FRONTEND_DIST, "static")]
 datas += [(TIERS_YAML, ".")]
 # 内置策略 → app/strategy/builtin/ (importlib 动态加载, 不能进 PYZ)
 datas += [(BUILTIN_STRATEGIES, "app/strategy/builtin")]
+# 桌面版种子数据 → seed_data/，首次启动复制到用户数据目录。
+for src, target in SEED_FILES:
+    if src.exists():
+        datas += [(str(src), target)]
 
 # ── 排除不需要的重型依赖 (主包不含 vectorbt 回测链) ──────────────────
 excludes = [
@@ -134,6 +185,19 @@ excludes = [
     "pytest_asyncio",
     "ruff",
     "mypy",
+    "pyarrow.tests",
+    "pyarrow._pyarrow_cpp_tests",
+    "polars.testing",
+    "pandas.tests",
+    "numpy.tests",
+    "webview.platforms.android",
+    "webview.platforms.cocoa",
+    "webview.platforms.gtk",
+    "webview.platforms.qt",
+    "plyer.platforms.android",
+    "plyer.platforms.ios",
+    "plyer.platforms.linux",
+    "plyer.platforms.macosx",
 ]
 
 a = Analysis(

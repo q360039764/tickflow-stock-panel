@@ -98,11 +98,30 @@ class Settings(BaseSettings):
     # (均可被环境变量 DATA_DIR 覆盖, pydantic-settings 自动注入)
     data_dir: Path = _user_data_root()
 
+    # Local market data — 内置 Sina HTTP 与通达信 Level1 TCP 采集配置。
+    local_projects_root: Path = _PROJECT_ROOT.parent
+    sina_realtime_data_dir: Path = _PROJECT_ROOT.parent / "sina-real-time" / "data"
+    sina_http_url: str = "https://hq.sinajs.cn/list={codes}"
+    sina_http_batch_size: int = 800
+    sina_http_timeout_s: float = 8.0
+    tdx_level1_host: str = "129.211.70.79"
+    tdx_level1_port: int = 7709
+    tdx_level1_timeout_s: float = 10.0
+    tdx_level1_cache_enabled: bool = True
+    level1_clickhouse_url: str = "http://localhost:8124"
+    level1_clickhouse_database: str = "stock_db"
+    level1_clickhouse_username: str = "stock_user"
+    level1_clickhouse_password: str = "stock_pass"
+    level1_clickhouse_timeout_s: float = 30.0
+
     # tiers.yaml 路径 — frozen: 资源目录内; 非 frozen: 项目根目录
     tiers_yaml: Path = _RESOURCE_ROOT / "tiers.yaml" if _IS_FROZEN else _PROJECT_ROOT / "tiers.yaml"
 
     # 静态文件(前端 dist) — frozen: 资源目录的 static/; 非 frozen: frontend/dist
     static_dir: Path = _RESOURCE_ROOT / "static" if _IS_FROZEN else (_PROJECT_ROOT / "frontend" / "dist")
+
+    # 桌面版种子数据 — frozen: 随包资源 seed_data/; 非 frozen: 项目 data/。
+    desktop_seed_dir: Path = _RESOURCE_ROOT / "seed_data" if _IS_FROZEN else (_PROJECT_ROOT / "data")
 
     @model_validator(mode="after")
     def _resolve_paths(self) -> Settings:
@@ -110,6 +129,12 @@ class Settings(BaseSettings):
         if not self.data_dir.is_absolute():
             # 相对路径基于项目根目录解析，而非 CWD
             self.data_dir = (_PROJECT_ROOT / self.data_dir).resolve()
+        if not self.local_projects_root.is_absolute():
+            self.local_projects_root = (_PROJECT_ROOT / self.local_projects_root).resolve()
+        if not self.sina_realtime_data_dir.is_absolute():
+            self.sina_realtime_data_dir = (_PROJECT_ROOT / self.sina_realtime_data_dir).resolve()
+        if not self.desktop_seed_dir.is_absolute():
+            self.desktop_seed_dir = (_PROJECT_ROOT / self.desktop_seed_dir).resolve()
         return self
 
     @property

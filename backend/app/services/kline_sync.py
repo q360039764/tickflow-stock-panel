@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 import polars as pl
 
 from app.indicators.pipeline import filter_halt_days
+from app.data_providers.registry import get_provider
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.client import get_client
 from app.tickflow.repository import KlineRepository
@@ -82,6 +83,22 @@ def sync_daily_batch(symbols: list[str],
     优先使用 start_time / end_time 区间 + count=10000,确保覆盖完整时间段。
     仅传 count 时按条数回溯。
     """
+    from app.services import preferences
+    provider_name = preferences.get_daily_data_provider()
+    if provider_name != "tickflow":
+        if batch_size is None:
+            chunks = [symbols]
+        else:
+            chunks = [symbols[i:i + batch_size] for i in range(0, len(symbols), batch_size)]
+        frames: list[pl.DataFrame] = []
+        provider = get_provider(provider_name)
+        for i, chunk in enumerate(chunks):
+            df = provider.get_daily(chunk, start_time, end_time, "stock")
+            if not df.is_empty():
+                frames.append(_normalize_daily(df))
+            if on_chunk_done:
+                on_chunk_done(i + 1, len(chunks))
+        return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
     tf = get_client()
     out: list[pl.DataFrame] = []
     interval = (60.0 / rpm) if rpm else 0
@@ -183,6 +200,29 @@ def sync_daily_by_quotes(repo: KlineRepository) -> int:
     from datetime import date as _date
 
     from app.tickflow.client import get_client
+    from app.services import preferences
+    provider_name = preferences.get_realtime_data_provider()
+    if provider_name != "tickflow":
+        provider = get_provider(provider_name)
+        quotes = provider.get_realtime()
+        if quotes.is_empty():
+            return 0
+        records = []
+        for q in quotes.iter_rows(named=True):
+            records.append({
+                "symbol": q.get("symbol"),
+                "open": q.get("open"),
+                "high": q.get("high"),
+                "low": q.get("low"),
+                "close": q.get("last_price") or q.get("close"),
+                "volume": q.get("volume"),
+                "amount": q.get("amount"),
+            })
+        daily_df = pl.DataFrame(records).with_columns(pl.lit(_date.today()).cast(pl.Date).alias("date"))
+        daily_df = filter_halt_days(daily_df)
+        repo.flush_live_daily(daily_df)
+        logger.info("sync_daily_by_quotes(local): %d symbols flushed", daily_df.height)
+        return daily_df.height
 
     tf = get_client()
     try:
@@ -411,6 +451,22 @@ def sync_minute_batch(
     count 仅作为 fallback 保留。
     on_chunk_done(current, total) 每个 chunk 完成后回调。
     """
+    from app.services import preferences
+    provider_name = preferences.get_minute_data_provider()
+    if provider_name != "tickflow":
+        if batch_size is None:
+            chunks = [symbols]
+        else:
+            chunks = [symbols[i:i + batch_size] for i in range(0, len(symbols), batch_size)]
+        frames: list[pl.DataFrame] = []
+        provider = get_provider(provider_name)
+        for i, chunk in enumerate(chunks):
+            df = provider.get_minute(chunk, start_time, end_time, "stock")
+            if not df.is_empty():
+                frames.append(_normalize_minute(df))
+            if on_chunk_done:
+                on_chunk_done(i + 1, len(chunks))
+        return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
     tf = get_client()
     out: list[pl.DataFrame] = []
     interval = (60.0 / rpm) if rpm else 0
@@ -458,6 +514,13 @@ def sync_minute_batch(
 def fetch_minute_single(symbol: str, trade_date: date) -> pl.DataFrame:
     """从 TickFlow 实时拉取单股单日分钟 K（不写入本地）。"""
     from datetime import datetime
+    from app.services import preferences
+    provider_name = preferences.get_minute_data_provider()
+    if provider_name != "tickflow":
+        start_time = datetime(trade_date.year, trade_date.month, trade_date.day, 9, 25, 0)
+        end_time = datetime(trade_date.year, trade_date.month, trade_date.day, 15, 5, 0)
+        provider = get_provider(provider_name)
+        return provider.get_minute([symbol], start_time, end_time, "stock")
     start_time = datetime(trade_date.year, trade_date.month, trade_date.day, 9, 25, 0)
     end_time = datetime(trade_date.year, trade_date.month, trade_date.day, 15, 5, 0)
     tf = get_client()

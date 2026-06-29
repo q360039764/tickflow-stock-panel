@@ -94,14 +94,15 @@ def get_minute_sync_days() -> int:
     return max(1, min(30, load().get("minute_sync_days", 5)))
 
 
-# ===== 数据源选择 (默认 TickFlow；第一阶段仅日K切换入口) =====
+# ===== 数据源选择（默认读取本机第二、第三个项目） =====
 
-_ALLOWED_DATA_PROVIDERS = {"tickflow"}
+_ALLOWED_DATA_PROVIDERS = {"local_projects", "tickflow"}
+_DEFAULT_DATA_PROVIDER = "local_projects"
 
 
 def get_daily_data_provider() -> str:
-    provider = str(load().get("daily_data_provider", "tickflow") or "tickflow").lower()
-    return provider if provider in _ALLOWED_DATA_PROVIDERS else "tickflow"
+    provider = str(load().get("daily_data_provider", _DEFAULT_DATA_PROVIDER) or _DEFAULT_DATA_PROVIDER).lower()
+    return provider if provider in _ALLOWED_DATA_PROVIDERS else _DEFAULT_DATA_PROVIDER
 
 
 def get_adj_factor_provider() -> str:
@@ -112,13 +113,13 @@ def get_adj_factor_provider() -> str:
 
 
 def get_minute_data_provider() -> str:
-    provider = str(load().get("minute_data_provider", "tickflow") or "tickflow").lower()
-    return provider if provider in _ALLOWED_DATA_PROVIDERS else "tickflow"
+    provider = str(load().get("minute_data_provider", _DEFAULT_DATA_PROVIDER) or _DEFAULT_DATA_PROVIDER).lower()
+    return provider if provider in _ALLOWED_DATA_PROVIDERS else _DEFAULT_DATA_PROVIDER
 
 
 def get_realtime_data_provider() -> str:
-    # 盘中实时现阶段仅支持 TickFlow。
-    return "tickflow"
+    provider = str(load().get("realtime_data_provider", _DEFAULT_DATA_PROVIDER) or _DEFAULT_DATA_PROVIDER).lower()
+    return provider if provider in _ALLOWED_DATA_PROVIDERS else _DEFAULT_DATA_PROVIDER
 
 
 # ===== 盘后管道拉取内容开关 (A股 / ETF / 指数 独立控制) =====
@@ -130,11 +131,15 @@ def get_pipeline_pull_a_share() -> bool:
 
 def get_pipeline_pull_etf() -> bool:
     """是否拉取 ETF 日K。默认 False(标的多,首次较慢)。"""
+    if get_daily_data_provider() != "tickflow":
+        return False
     return load().get("pipeline_pull_etf", False)
 
 
 def get_pipeline_pull_index() -> bool:
     """是否拉取指数日K。默认 True。"""
+    if get_daily_data_provider() != "tickflow":
+        return False
     return load().get("pipeline_pull_index", True)
 
 

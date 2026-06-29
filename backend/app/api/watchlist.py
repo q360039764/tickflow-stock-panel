@@ -78,6 +78,18 @@ def clear_all():
     return {"removed": count}
 
 
+@router.get("/quotes")
+def quotes(request: Request):
+    """返回自选股实时行情；本地模式读取 sina-real-time 最新 CSV。"""
+    rows = watchlist.list_symbols()
+    symbols = [str(row.get("symbol") or "").strip().upper() for row in rows]
+    symbols = [symbol for symbol in symbols if symbol]
+    if not symbols:
+        return {"quotes": []}
+    quotes_data = watchlist.fetch_quotes(symbols, request.app.state.capabilities)
+    return {"quotes": quotes_data}
+
+
 # 自选页需要的列
 _WATCHLIST_COLS = [
     "symbol", "close", "change_pct", "change_amount", "amount",

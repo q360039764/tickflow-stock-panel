@@ -248,6 +248,19 @@ def _probe_real(tiers: dict) -> tuple[CapabilitySet, list[str]]:
 
 def detect_capabilities(force: bool = False) -> CapabilitySet:
     """探测当前 API Key 的能力集。"""
+    from app.services import preferences
+    if preferences.get_daily_data_provider() == "local_projects":
+        capset = CapabilitySet({
+            Cap.QUOTE_BY_SYMBOL: CapabilityLimits(rpm=120, batch=500),
+            Cap.QUOTE_BATCH: CapabilityLimits(rpm=120, batch=500),
+            Cap.QUOTE_POOL: CapabilityLimits(rpm=120),
+            Cap.KLINE_DAILY_BY_SYMBOL: CapabilityLimits(rpm=120, batch=1),
+            Cap.KLINE_DAILY_BATCH: CapabilityLimits(rpm=120, batch=500),
+            Cap.KLINE_MINUTE_BY_SYMBOL: CapabilityLimits(rpm=120, batch=1),
+            Cap.KLINE_MINUTE_BATCH: CapabilityLimits(rpm=120, batch=500),
+        })
+        _persist(capset, "LocalProjects", log=["使用本地 sina-real-time 与 A-stock-level1-dump 数据源"], missing=[], extras=[])
+        return capset
     cache_path = settings.data_dir / _CAPSET_CACHE_FILE
     if not force and cache_path.exists():
         with cache_path.open(encoding="utf-8") as f:

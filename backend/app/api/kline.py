@@ -425,7 +425,6 @@ async def sync_minute(request: Request):
     from app.api.data import invalidate_storage_cache
     from app.services.preferences import get_minute_sync_days
     from app.tickflow.capabilities import Cap
-    from app.tickflow.pools import get_pool
 
     repo = request.app.state.repo
     capset = request.app.state.capabilities
@@ -447,16 +446,16 @@ async def sync_minute(request: Request):
 
         try:
             progress("sync_minute", 5, "解析标的池…")
-            universe = sorted(set(get_pool("watchlist")) | set(get_pool("CN_Equity_A")))
-            # 补充 instruments 全量标的，覆盖北交所、新股等
-            inst_path = repo.store.data_dir / "instruments" / "instruments.parquet"
-            if inst_path.exists():
-                try:
-                    import polars as pl
-                    inst = pl.read_parquet(inst_path, columns=["symbol"])
-                    universe = sorted(set(universe) | set(inst["symbol"].to_list()))
-                except Exception:  # noqa: BLE001
-                    pass
+            from app.services.local_universe import resolve_local_stock_universe
+            from app.services import preferences
+            if preferences.get_minute_data_provider() != "tickflow":
+                universe = resolve_local_stock_universe(repo.store.data_dir)
+            else:
+                from app.tickflow.pools import get_pool
+                universe = sorted(set(get_pool("watchlist")) | set(get_pool("CN_Equity_A")))
+                # 补充 instruments 全量标的，覆盖北交所、新股等。
+                local_symbols = resolve_local_stock_universe(repo.store.data_dir, include_demo_when_empty=False)
+                universe = sorted(set(universe) | set(local_symbols))
             progress("sync_minute", 10, f"标的池 {len(universe)} 只")
 
             days = get_minute_sync_days()
@@ -801,6 +800,10 @@ async def extend_minute_history(request: Request):
 
 def _resolve_minute_universe(capset, repo) -> list[str]:
     """分钟K标的池解析。"""
+    from app.services import preferences
+    from app.services.local_universe import resolve_local_stock_universe
+    if preferences.get_minute_data_provider() != "tickflow":
+        return resolve_local_stock_universe(repo.store.data_dir)
     from app.tickflow.capabilities import Cap
     if capset.has(Cap.KLINE_MINUTE_BATCH):
         try:
@@ -810,4 +813,5 @@ def _resolve_minute_universe(capset, repo) -> list[str]:
                 return sorted(all_a)
         except Exception:
             pass
-    return []
+    from app.services.local_universe import resolve_local_stock_universe
+    return resolve_local_stock_universe(repo.store.data_dir, include_demo_when_empty=False)

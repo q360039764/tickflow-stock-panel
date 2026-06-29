@@ -321,6 +321,11 @@ class QuoteService:
 
     def _fetch_full_market_quotes(self) -> None:
         """拉取全市场行情 → 写 daily + 计算 enriched + 更新缓存。"""
+        from app.services import preferences
+        provider_name = preferences.get_realtime_data_provider()
+        if provider_name != "tickflow":
+            self._fetch_local_realtime_quotes(symbols=None, merge=False)
+            return
         from app.tickflow.client import get_paid_realtime_client
 
         tf = get_paid_realtime_client()
@@ -448,6 +453,14 @@ class QuoteService:
     def _fetch_watchlist_quotes(self) -> None:
         """Free 档自选股实时: 只拉取最多 5 个 symbols。"""
         from app.services import preferences
+        provider_name = preferences.get_realtime_data_provider()
+        if provider_name != "tickflow":
+            symbols = preferences.get_realtime_watchlist_symbols()
+            if not symbols:
+                logger.info("自选实时未配置标的, 跳过行情拉取")
+                return
+            self._fetch_local_realtime_quotes(symbols=symbols, merge=True)
+            return
         from app.tickflow.client import get_paid_realtime_client
 
         symbols = preferences.get_realtime_watchlist_symbols()
@@ -529,6 +542,48 @@ class QuoteService:
     # ================================================================
     # 工具
     # ================================================================
+
+    def _fetch_local_realtime_quotes(self, symbols: list[str] | None, merge: bool) -> None:
+        """从第二个项目 CSV 读取实时行情并更新本项目缓存。"""
+        from app.data_providers.registry import get_provider
+        from app.data_providers.local_projects_provider import realtime_records_from_df
+        from app.services import preferences
+
+        t0 = time.perf_counter()
+        now_ts = time.perf_counter()
+        provider = get_provider(preferences.get_realtime_data_provider())
+        quotes = provider.get_realtime(symbols=symbols)
+        records = realtime_records_from_df(quotes)
+        if not records:
+            logger.warning("本地实时行情为空")
+            return
+
+        fetch_ms = (time.perf_counter() - t0) * 1000
+        fetched_at = time.time() * 1000
+        with self._lock:
+            self._fetch_time = now_ts
+            self._fetch_ms = fetch_ms
+            self._fetched_at = fetched_at
+            self._symbol_count = len(records)
+            self._index_symbol_count = 0
+            self._etf_symbol_count = 0
+            self._index_quotes_cache = None
+
+        logger.info("本地实时刷新: %d 只股票, 耗时 %.0fms", len(records), fetch_ms)
+        daily_df = self._build_daily(records)
+        quote_extra = self._build_quote_extra(records)
+        if not daily_df.is_empty() and self._repo:
+            try:
+                if merge:
+                    self._repo.merge_live_daily_asset("stock", daily_df)
+                else:
+                    self._repo.flush_live_daily(daily_df)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("本地实时日K写盘失败: %s", e)
+            self._flush_live_enriched(daily_df, quote_extra, asset_type="stock", merge=merge)
+
+        self._update_event.set()
+        self._evaluate_monitors(daily_df, quote_extra)
 
     @staticmethod
     def _build_daily(records: list[dict]) -> pl.DataFrame:

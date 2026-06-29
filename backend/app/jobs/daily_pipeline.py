@@ -21,6 +21,7 @@ from apscheduler.triggers.cron import CronTrigger
 from app.indicators.pipeline import run_pipeline
 from app.config import settings
 from app.services import index_sync, instrument_sync, kline_sync, preferences as _prefs
+from app.services.local_universe import resolve_local_stock_universe
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.pools import DEMO_SYMBOLS, get_pool
 from app.tickflow.repository import KlineRepository
@@ -41,11 +42,9 @@ def _invalidate(table: str | None = None) -> None:
 
 
 def _resolve_universe(capset: CapabilitySet) -> list[str]:
-    """解析标的池 — 以 CN_Equity_A (沪深京A股 ~5522只) 为主。
-
-    有 batch 能力 → 直接拉 CN_Equity_A universe
-    其他用户 → 用 instruments parquet + watchlist 兜底
-    """
+    """解析股票标的池；本地数据源优先使用 instruments.parquet。"""
+    if _prefs.get_daily_data_provider() != "tickflow":
+        return resolve_local_stock_universe(settings.data_dir)
     if capset.has(Cap.KLINE_DAILY_BATCH):
         try:
             all_a = get_pool("CN_Equity_A", refresh=True)
@@ -304,6 +303,9 @@ def run_now(
     etf_adj_symbols = 0
     pull_index = _prefs.get_pipeline_pull_index()
     pull_etf = _prefs.get_pipeline_pull_etf()
+    if _prefs.get_daily_data_provider() != "tickflow":
+        pull_index = False
+        pull_etf = False
 
     if capset.has(Cap.KLINE_DAILY_BATCH) and (pull_index or pull_etf):
         _types = []

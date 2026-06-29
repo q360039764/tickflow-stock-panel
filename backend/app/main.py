@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -27,6 +28,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _log_startup_stage(stage: str, started_at: float | None = None) -> float:
+    """记录服务启动阶段和耗时，便于排查桌面版打包后的冷启动。"""
+    now = time.perf_counter()
+    if started_at is None:
+        logger.info("启动阶段开始: %s", stage)
+    else:
+        logger.info("启动阶段完成: %s, 耗时 %.2fs", stage, now - started_at)
+    return now
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(
@@ -35,40 +46,53 @@ async def lifespan(app: FastAPI):
     )
 
     # 数据层
+    stage_started = _log_startup_stage("数据层")
     store = DataStore()
     repo = KlineRepository(store)
     app.state.datastore = store
     app.state.repo = repo
+    _log_startup_stage("数据层", stage_started)
 
     # Polars 缓存预热
+    stage_started = _log_startup_stage("Polars 缓存预热")
     repo.refresh_cache()
+    _log_startup_stage("Polars 缓存预热", stage_started)
 
     # 能力探测
+    stage_started = _log_startup_stage("能力探测")
     capset = detect_capabilities()
     app.state.capabilities = capset
     logger.info("ready; %d capabilities active", len(capset.all()))
+    _log_startup_stage("能力探测", stage_started)
 
     # 全局行情服务
+    stage_started = _log_startup_stage("全局行情服务")
     qs = QuoteService()
     app.state.quote_service = qs
     qs.set_repo(repo)
     qs.boot_check()
+    _log_startup_stage("全局行情服务", stage_started)
 
     # QuoteService 需要访问 strategy_monitor 等单例
     # 先创建 strategy_monitor，再注入 app.state
+    stage_started = _log_startup_stage("策略监控服务")
     from app.strategy.monitor import StrategyMonitorService
     strategy_monitor = StrategyMonitorService()
     app.state.strategy_monitor = strategy_monitor
     qs.set_app_state(app.state)
+    _log_startup_stage("策略监控服务", stage_started)
 
     # 五档盘口 sealed 服务(真假涨停/跌停, 独立旁路线)
+    stage_started = _log_startup_stage("五档盘口服务")
     from app.services.depth_service import DepthService
     depth_service = DepthService()
     depth_service.set_repo(repo)
     depth_service.set_app_state(app.state)
     app.state.depth_service = depth_service
+    _log_startup_stage("五档盘口服务", stage_started)
 
     # 启动调度器(若 enriched 数据为空,首次启动可手动 POST /api/pipeline/run)
+    stage_started = _log_startup_stage("定时调度器")
     try:
         daily_pipeline.set_app_state(app.state)  # 供 depth_finalize job 访问 depth_service
         scheduler = daily_pipeline.start_scheduler(repo, capset)
@@ -76,34 +100,44 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("scheduler not started: %s", e)
         app.state.scheduler = None
+    _log_startup_stage("定时调度器", stage_started)
 
     # depth sealed: 启动补跑(当天文件不存在) + 盘中轮询(有能力时)
+    stage_started = _log_startup_stage("五档盘口启动检查")
     try:
         depth_service.boot_check()
         depth_service.start_polling()
     except Exception as e:  # noqa: BLE001
         logger.warning("depth_service init failed: %s", e)
+    _log_startup_stage("五档盘口启动检查", stage_started)
 
     # 扩展数据定时拉取
+    stage_started = _log_startup_stage("扩展数据调度")
     from app.services.ext_pull import pull_scheduler
     pull_scheduler.start(store.data_dir)
     pull_scheduler.refresh(store.data_dir)
     app.state.pull_scheduler = pull_scheduler
+    _log_startup_stage("扩展数据调度", stage_started)
 
     # 内置扩展表 (概念/行业): 只创建 config (含拉取配置), 不自动拉数据
     # 数据获取由用户在概念/行业页点「获取数据」手动触发 (POST /api/ext-data/presets/{id}/fetch)
+    stage_started = _log_startup_stage("内置扩展表")
     try:
         from app.services.ext_presets import ensure_builtin_presets
         await ensure_builtin_presets(store.data_dir)
     except Exception as e:  # noqa: BLE001
         logger.warning("内置扩展表初始化失败 (不影响启动): %s", e)
+    _log_startup_stage("内置扩展表", stage_started)
 
     # 财务数据独立调度 (需 Expert 套餐)
+    stage_started = _log_startup_stage("财务数据调度")
     from app.services.financial_sync import financial_scheduler
     financial_scheduler.start(store.data_dir, capset)
     app.state.financial_scheduler = financial_scheduler
+    _log_startup_stage("财务数据调度", stage_started)
 
     # 策略引擎
+    stage_started = _log_startup_stage("策略引擎")
     from app.strategy.engine import StrategyEngine
     from app.strategy.monitor import StrategyMonitorService
     from app.services.screener import ScreenerService
@@ -121,8 +155,10 @@ async def lifespan(app: FastAPI):
     )
     app.state.strategy_engine = strategy_engine
     logger.info("strategy engine loaded: %d strategies", len(strategy_engine.list_strategies()))
+    _log_startup_stage("策略引擎", stage_started)
 
     # 通用监控规则引擎: 启动时 reload 规则到内存态 (修复重启后告警失效)
+    stage_started = _log_startup_stage("监控规则引擎")
     from app.strategy.monitor import MonitorRuleEngine
     from app.strategy import monitor_rules as mr_store
     from app.services import preferences
@@ -148,6 +184,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("monitor engine load failed: %s", e)
     app.state.monitor_engine = monitor_engine
+    _log_startup_stage("监控规则引擎", stage_started)
 
     yield
 
