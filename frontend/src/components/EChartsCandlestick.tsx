@@ -74,6 +74,27 @@ export interface SubChartDef {
 }
 
 // ===== 成交量 N 日均量 =====
+function finiteNumber(value: unknown): number | null {
+  // 图表展示统一使用有限数值，避免 null、NaN 或无穷大触发 toFixed 异常。
+  if (value == null || value === '') return null
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+function seriesValue(value: unknown): number | '-' {
+  const n = finiteNumber(value)
+  return n == null ? '-' : n
+}
+
+function fmtFixed(value: unknown, digits: number): string {
+  const n = finiteNumber(value)
+  return n == null ? '—' : n.toFixed(digits)
+}
+
+function fmtPrice(value: unknown): string {
+  return fmtFixed(value, 2)
+}
+
 function volMaN(data: OHLC[], n: number): (number | null)[] {
   const result: (number | null)[] = []
   for (let i = 0; i < data.length; i++) {
@@ -86,10 +107,11 @@ function volMaN(data: OHLC[], n: number): (number | null)[] {
 }
 
 function fmtVol(v: number | null | undefined): string {
-  if (v == null) return '—'
-  if (v >= 1e8) return (v / 1e8).toFixed(2) + '亿'
-  if (v >= 1e4) return (v / 1e4).toFixed(0) + '万'
-  return v.toFixed(0)
+  const n = finiteNumber(v)
+  if (n == null) return '—'
+  if (n >= 1e8) return (n / 1e8).toFixed(2) + '亿'
+  if (n >= 1e4) return (n / 1e4).toFixed(0) + '万'
+  return n.toFixed(0)
 }
 
 export const SUB_CHARTS: SubChartDef[] = [
@@ -147,7 +169,7 @@ export const SUB_CHARTS: SubChartDef[] = [
       {
         name: 'DIF',
         type: 'line',
-        data: data.map(d => d.macd_dif != null ? Number(d.macd_dif) : '-'),
+        data: data.map(d => seriesValue(d.macd_dif)),
         smooth: true, symbol: 'none', animation: false,
         lineStyle: { width: 1, color: '#FACC15' },
         itemStyle: { color: '#FACC15' },
@@ -155,7 +177,7 @@ export const SUB_CHARTS: SubChartDef[] = [
       {
         name: 'DEA',
         type: 'line',
-        data: data.map(d => d.macd_dea != null ? Number(d.macd_dea) : '-'),
+        data: data.map(d => seriesValue(d.macd_dea)),
         smooth: true, symbol: 'none', animation: false,
         lineStyle: { width: 1, color: '#8B5CF6' },
         itemStyle: { color: '#8B5CF6' },
@@ -164,11 +186,11 @@ export const SUB_CHARTS: SubChartDef[] = [
         name: 'MACD',
         type: 'bar',
         data: data.map(d => {
-          const v = d.macd_hist
+          const v = finiteNumber(d.macd_hist)
           if (v == null) return '-'
           return {
-            value: Number(v),
-            itemStyle: { color: Number(v) >= 0 ? 'rgba(240,68,56,0.6)' : 'rgba(18,183,106,0.6)' },
+            value: v,
+            itemStyle: { color: v >= 0 ? 'rgba(240,68,56,0.6)' : 'rgba(18,183,106,0.6)' },
           }
         }),
         barWidth: '40%',
@@ -178,9 +200,9 @@ export const SUB_CHARTS: SubChartDef[] = [
     buildInfo: (d) => {
       if (!d) return []
       return [
-        { label: 'DIF', color: '#FACC15', value: d.macd_dif != null ? d.macd_dif.toFixed(3) : '—' },
-        { label: 'DEA', color: '#8B5CF6', value: d.macd_dea != null ? d.macd_dea.toFixed(3) : '—' },
-        { label: 'MACD', color: d.macd_hist != null && d.macd_hist >= 0 ? '#C74040' : '#2D9B65', value: d.macd_hist != null ? d.macd_hist.toFixed(3) : '—' },
+        { label: 'DIF', color: '#FACC15', value: fmtFixed(d.macd_dif, 3) },
+        { label: 'DEA', color: '#8B5CF6', value: fmtFixed(d.macd_dea, 3) },
+        { label: 'MACD', color: (finiteNumber(d.macd_hist) ?? 0) >= 0 ? '#C74040' : '#2D9B65', value: fmtFixed(d.macd_hist, 3) },
       ]
     },
   },
@@ -193,7 +215,7 @@ export const SUB_CHARTS: SubChartDef[] = [
       {
         name: 'RSI6',
         type: 'line',
-        data: data.map(d => d.rsi_6 != null ? Number(d.rsi_6) : '-'),
+        data: data.map(d => seriesValue(d.rsi_6)),
         smooth: true, symbol: 'none', animation: false,
         lineStyle: { width: 1, color: '#FACC15' },
         itemStyle: { color: '#FACC15' },
@@ -201,7 +223,7 @@ export const SUB_CHARTS: SubChartDef[] = [
       {
         name: 'RSI14',
         type: 'line',
-        data: data.map(d => d.rsi_14 != null ? Number(d.rsi_14) : '-'),
+        data: data.map(d => seriesValue(d.rsi_14)),
         smooth: true, symbol: 'none', animation: false,
         lineStyle: { width: 1, color: '#3B82F6' },
         itemStyle: { color: '#3B82F6' },
@@ -209,7 +231,7 @@ export const SUB_CHARTS: SubChartDef[] = [
       {
         name: 'RSI24',
         type: 'line',
-        data: data.map(d => d.rsi_24 != null ? Number(d.rsi_24) : '-'),
+        data: data.map(d => seriesValue(d.rsi_24)),
         smooth: true, symbol: 'none', animation: false,
         lineStyle: { width: 1, color: '#8B5CF6' },
         itemStyle: { color: '#8B5CF6' },
@@ -218,9 +240,9 @@ export const SUB_CHARTS: SubChartDef[] = [
     buildInfo: (d) => {
       if (!d) return []
       return [
-        { label: 'RSI6', color: '#FACC15', value: d.rsi_6 != null ? d.rsi_6.toFixed(1) : '—' },
-        { label: 'RSI14', color: '#3B82F6', value: d.rsi_14 != null ? d.rsi_14.toFixed(1) : '—' },
-        { label: 'RSI24', color: '#8B5CF6', value: d.rsi_24 != null ? d.rsi_24.toFixed(1) : '—' },
+        { label: 'RSI6', color: '#FACC15', value: fmtFixed(d.rsi_6, 1) },
+        { label: 'RSI14', color: '#3B82F6', value: fmtFixed(d.rsi_14, 1) },
+        { label: 'RSI24', color: '#8B5CF6', value: fmtFixed(d.rsi_24, 1) },
       ]
     },
   },
@@ -232,7 +254,7 @@ export const SUB_CHARTS: SubChartDef[] = [
       {
         name: 'K',
         type: 'line',
-        data: data.map(d => d.kdj_k != null ? Number(d.kdj_k) : '-'),
+        data: data.map(d => seriesValue(d.kdj_k)),
         smooth: true, symbol: 'none', animation: false,
         lineStyle: { width: 1, color: '#FACC15' },
         itemStyle: { color: '#FACC15' },
@@ -240,7 +262,7 @@ export const SUB_CHARTS: SubChartDef[] = [
       {
         name: 'D',
         type: 'line',
-        data: data.map(d => d.kdj_d != null ? Number(d.kdj_d) : '-'),
+        data: data.map(d => seriesValue(d.kdj_d)),
         smooth: true, symbol: 'none', animation: false,
         lineStyle: { width: 1, color: '#3B82F6' },
         itemStyle: { color: '#3B82F6' },
@@ -248,7 +270,7 @@ export const SUB_CHARTS: SubChartDef[] = [
       {
         name: 'J',
         type: 'line',
-        data: data.map(d => d.kdj_j != null ? Number(d.kdj_j) : '-'),
+        data: data.map(d => seriesValue(d.kdj_j)),
         smooth: true, symbol: 'none', animation: false,
         lineStyle: { width: 1, color: '#8B5CF6' },
         itemStyle: { color: '#8B5CF6' },
@@ -257,9 +279,9 @@ export const SUB_CHARTS: SubChartDef[] = [
     buildInfo: (d) => {
       if (!d) return []
       return [
-        { label: 'K', color: '#FACC15', value: d.kdj_k != null ? d.kdj_k.toFixed(1) : '—' },
-        { label: 'D', color: '#3B82F6', value: d.kdj_d != null ? d.kdj_d.toFixed(1) : '—' },
-        { label: 'J', color: '#8B5CF6', value: d.kdj_j != null ? d.kdj_j.toFixed(1) : '—' },
+        { label: 'K', color: '#FACC15', value: fmtFixed(d.kdj_k, 1) },
+        { label: 'D', color: '#3B82F6', value: fmtFixed(d.kdj_d, 1) },
+        { label: 'J', color: '#8B5CF6', value: fmtFixed(d.kdj_j, 1) },
       ]
     },
   },
@@ -567,24 +589,27 @@ function buildOption(
     })
 
   if (linkedPrice != null) {
-    markLineData.push({
-      yAxis: linkedPrice,
-      lineStyle: { color: '#3B82F6', type: 'dashed', width: 1, opacity: 0.7 },
-      label: {
-        show: true,
-        formatter: linkedPrice.toFixed(2),
-        position: 'insideEndTop',
-        color: '#3B82F6',
-        fontSize: 10,
-        fontFamily: 'JetBrains Mono, monospace',
-        backgroundColor: 'rgba(24,24,27,0.85)',
-        borderColor: '#3B82F6',
-        borderWidth: 1,
-        padding: [1, 4],
-        borderRadius: 2,
-      },
-      symbol: 'none',
-    })
+    const linkedPriceValue = finiteNumber(linkedPrice)
+    if (linkedPriceValue != null) {
+      markLineData.push({
+        yAxis: linkedPriceValue,
+        lineStyle: { color: '#3B82F6', type: 'dashed', width: 1, opacity: 0.7 },
+        label: {
+          show: true,
+          formatter: fmtPrice(linkedPriceValue),
+          position: 'insideEndTop',
+          color: '#3B82F6',
+          fontSize: 10,
+          fontFamily: 'JetBrains Mono, monospace',
+          backgroundColor: 'rgba(24,24,27,0.85)',
+          borderColor: '#3B82F6',
+          borderWidth: 1,
+          padding: [1, 4],
+          borderRadius: 2,
+        },
+        symbol: 'none',
+      })
+    }
   }
 
   series.push({
@@ -603,7 +628,7 @@ function buildOption(
   if (hasMA) {
     const maLine = (key: keyof OHLC, color: string, name: string) => ({
       name, type: 'line',
-      data: data.map(d => (d[key] != null ? Number(d[key]) : '-')),
+      data: data.map(d => seriesValue(d[key])),
       smooth: true, symbol: 'none', animation: false,
       silent: true,
       lineStyle: { width: 1, color }, itemStyle: { color },
@@ -615,11 +640,11 @@ function buildOption(
   }
 
   // BOLL 布林带 — 需在 activeIndicators 中激活
-  const showBOLL = activeIndicators.includes('boll') && data.some(d => d.boll_upper != null || d.boll_lower != null)
+  const showBOLL = activeIndicators.includes('boll') && data.some(d => finiteNumber(d.boll_upper) != null && finiteNumber(d.boll_lower) != null)
   if (showBOLL) {
     const bollLine = (key: keyof OHLC, color: string, name: string) => ({
       name, type: 'line',
-      data: data.map(d => (d[key] != null ? Number(d[key]) : '-')),
+      data: data.map(d => seriesValue(d[key])),
       smooth: true, symbol: 'none', animation: false,
       silent: true,
       lineStyle: { width: 1, color, type: 'dashed' as const }, itemStyle: { color },
@@ -821,33 +846,34 @@ export function EChartsCandlestick({
     let html = `<div style="display:flex;align-items:center;gap:6px;padding:0 8px;font:11px 'JetBrains Mono',monospace;select:none;height:20px;flex-wrap:wrap">`
     html += `<span style="color:${THEME.text}">${d.date}</span>`
     html += `<span style="color:${THEME.text}">开</span>`
-    html += `<span style="color:${d.open >= d.close ? THEME.bear : THEME.bull}">${d.open.toFixed(2)}</span>`
+    html += `<span style="color:${d.open >= d.close ? THEME.bear : THEME.bull}">${fmtPrice(d.open)}</span>`
     html += `<span style="color:${THEME.text}">高</span>`
-    html += `<span style="color:${THEME.bull}">${d.high.toFixed(2)}</span>`
+    html += `<span style="color:${THEME.bull}">${fmtPrice(d.high)}</span>`
     html += `<span style="color:${THEME.text}">低</span>`
-    html += `<span style="color:${THEME.bear}">${d.low.toFixed(2)}</span>`
+    html += `<span style="color:${THEME.bear}">${fmtPrice(d.low)}</span>`
     html += `<span style="color:${THEME.text}">收</span>`
-    html += `<span style="color:${clr};font-weight:600">${d.close.toFixed(2)}</span>`
+    html += `<span style="color:${clr};font-weight:600">${fmtPrice(d.close)}</span>`
     // 涨跌幅 (收盘后, 换手前; 和收间隔一些距离)
     if (prev) {
       const chgPct = (chg / prev.close * 100)
-      html += `<span style="color:${clr};margin-left:8px">${isUp ? '+' : ''}${chgPct.toFixed(2)}%</span>`
+      const chgPctText = fmtFixed(chgPct, 2)
+      if (chgPctText !== '—') html += `<span style="color:${clr};margin-left:8px">${isUp ? '+' : ''}${chgPctText}%</span>`
     }
     if (turnoverRate != null) {
       html += `<span style="color:${THEME.text}">换手</span>`
-      html += `<span style="color:${THEME.text}">${turnoverRate.toFixed(2)}%</span>`
+      html += `<span style="color:${THEME.text}">${fmtFixed(turnoverRate, 2)}%</span>`
     }
     html += `</div>`
 
     // 第二行: MA + BOLL
     if (showMA) {
       html += `<div style="display:flex;align-items:center;gap:10px;padding:0 8px;font:11px 'JetBrains Mono',monospace;select:none;height:20px;flex-wrap:wrap">`
-      if (d.ma5 != null) html += `<span style="color:${THEME.ma5}">MA5:${Number(d.ma5).toFixed(2)}</span>`
-      if (d.ma10 != null) html += `<span style="color:${THEME.ma10}">MA10:${Number(d.ma10).toFixed(2)}</span>`
-      if (d.ma20 != null) html += `<span style="color:${THEME.ma20}">MA20:${Number(d.ma20).toFixed(2)}</span>`
-      if (d.ma60 != null) html += `<span style="color:${THEME.ma60}">MA60:${Number(d.ma60).toFixed(2)}</span>`
-      if (d.boll_upper != null && activeIndicators.includes('boll')) {
-        html += `<span style="color:#E879F9">BOLL:${Number(d.boll_upper).toFixed(2)}/${Number(d.ma20).toFixed(2)}/${Number(d.boll_lower).toFixed(2)}</span>`
+      if (finiteNumber(d.ma5) != null) html += `<span style="color:${THEME.ma5}">MA5:${fmtPrice(d.ma5)}</span>`
+      if (finiteNumber(d.ma10) != null) html += `<span style="color:${THEME.ma10}">MA10:${fmtPrice(d.ma10)}</span>`
+      if (finiteNumber(d.ma20) != null) html += `<span style="color:${THEME.ma20}">MA20:${fmtPrice(d.ma20)}</span>`
+      if (finiteNumber(d.ma60) != null) html += `<span style="color:${THEME.ma60}">MA60:${fmtPrice(d.ma60)}</span>`
+      if (activeIndicators.includes('boll') && finiteNumber(d.boll_upper) != null && finiteNumber(d.ma20) != null && finiteNumber(d.boll_lower) != null) {
+        html += `<span style="color:#E879F9">BOLL:${fmtPrice(d.boll_upper)}/${fmtPrice(d.ma20)}/${fmtPrice(d.boll_lower)}</span>`
       }
       html += `</div>`
     }
@@ -1050,33 +1076,34 @@ export function EChartsCandlestick({
     let html = `<div style="display:flex;align-items:center;gap:6px;padding:0 8px;font:11px 'JetBrains Mono',monospace;height:20px;flex-wrap:wrap">`
     html += `<span style="color:${THEME.text}">${d.date}</span>`
     html += `<span style="color:${THEME.text}">开</span>`
-    html += `<span style="color:${d.open >= d.close ? THEME.bear : THEME.bull}">${d.open.toFixed(2)}</span>`
+    html += `<span style="color:${d.open >= d.close ? THEME.bear : THEME.bull}">${fmtPrice(d.open)}</span>`
     html += `<span style="color:${THEME.text}">高</span>`
-    html += `<span style="color:${THEME.bull}">${d.high.toFixed(2)}</span>`
+    html += `<span style="color:${THEME.bull}">${fmtPrice(d.high)}</span>`
     html += `<span style="color:${THEME.text}">低</span>`
-    html += `<span style="color:${THEME.bear}">${d.low.toFixed(2)}</span>`
+    html += `<span style="color:${THEME.bear}">${fmtPrice(d.low)}</span>`
     html += `<span style="color:${THEME.text}">收</span>`
     const prevClose0 = data[idx-1]?.close ?? d.close
     const clr0 = d.close >= prevClose0 ? THEME.bull : THEME.bear
-    html += `<span style="color:${clr0};font-weight:600">${d.close.toFixed(2)}</span>`
+    html += `<span style="color:${clr0};font-weight:600">${fmtPrice(d.close)}</span>`
     // 涨跌幅 (收盘后, 换手前; 和收间隔一些距离)
     if (idx > 0) {
       const chgPct0 = ((d.close - prevClose0) / prevClose0 * 100)
-      html += `<span style="color:${clr0};margin-left:8px">${chgPct0 >= 0 ? '+' : ''}${chgPct0.toFixed(2)}%</span>`
+      const chgPct0Text = fmtFixed(chgPct0, 2)
+      if (chgPct0Text !== '—') html += `<span style="color:${clr0};margin-left:8px">${chgPct0 >= 0 ? '+' : ''}${chgPct0Text}%</span>`
     }
     if (turnoverRate != null) {
       html += `<span style="color:${THEME.text}">换手</span>`
-      html += `<span style="color:${THEME.text}">${turnoverRate.toFixed(2)}%</span>`
+      html += `<span style="color:${THEME.text}">${fmtFixed(turnoverRate, 2)}%</span>`
     }
     html += `</div>`
     if (showMA) {
       html += `<div style="display:flex;align-items:center;gap:10px;padding:0 8px;font:11px 'JetBrains Mono',monospace;height:20px;flex-wrap:wrap">`
-      if (d.ma5 != null) html += `<span style="color:${THEME.ma5}">MA5:${Number(d.ma5).toFixed(2)}</span>`
-      if (d.ma10 != null) html += `<span style="color:${THEME.ma10}">MA10:${Number(d.ma10).toFixed(2)}</span>`
-      if (d.ma20 != null) html += `<span style="color:${THEME.ma20}">MA20:${Number(d.ma20).toFixed(2)}</span>`
-      if (d.ma60 != null) html += `<span style="color:${THEME.ma60}">MA60:${Number(d.ma60).toFixed(2)}</span>`
-      if (d.boll_upper != null && activeIndicators.includes('boll')) {
-        html += `<span style="color:#E879F9">BOLL:${Number(d.boll_upper).toFixed(2)}/${Number(d.ma20).toFixed(2)}/${Number(d.boll_lower).toFixed(2)}</span>`
+      if (finiteNumber(d.ma5) != null) html += `<span style="color:${THEME.ma5}">MA5:${fmtPrice(d.ma5)}</span>`
+      if (finiteNumber(d.ma10) != null) html += `<span style="color:${THEME.ma10}">MA10:${fmtPrice(d.ma10)}</span>`
+      if (finiteNumber(d.ma20) != null) html += `<span style="color:${THEME.ma20}">MA20:${fmtPrice(d.ma20)}</span>`
+      if (finiteNumber(d.ma60) != null) html += `<span style="color:${THEME.ma60}">MA60:${fmtPrice(d.ma60)}</span>`
+      if (activeIndicators.includes('boll') && finiteNumber(d.boll_upper) != null && finiteNumber(d.ma20) != null && finiteNumber(d.boll_lower) != null) {
+        html += `<span style="color:#E879F9">BOLL:${fmtPrice(d.boll_upper)}/${fmtPrice(d.ma20)}/${fmtPrice(d.boll_lower)}</span>`
       }
       html += `</div>`
     }

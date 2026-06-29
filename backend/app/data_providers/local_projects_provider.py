@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
@@ -84,6 +85,89 @@ def _date_bounds(start_time: datetime | None, end_time: datetime | None) -> tupl
     end = end_time.date() if end_time else date.today()
     start = start_time.date() if start_time else end
     return start, end
+
+
+def _finite_float(value) -> float | None:
+    """将本地行情数值转为有限浮点数，过滤空值、NaN 和无穷大。"""
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _positive_price(value) -> float | None:
+    """解析价格字段，0、负数和非法数值视为空值。"""
+    parsed = _finite_float(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
+def _quote_trade_date(row: dict) -> date | None:
+    """从 Sina 实时行情中提取交易日，避免用系统日期误造非交易日 K 线。"""
+    raw_date = row.get("date")
+    if raw_date:
+        if isinstance(raw_date, date) and not isinstance(raw_date, datetime):
+            return raw_date
+        try:
+            return datetime.fromisoformat(str(raw_date)[:10]).date()
+        except ValueError:
+            pass
+
+    raw_ts = row.get("timestamp")
+    if raw_ts:
+        if isinstance(raw_ts, datetime):
+            return raw_ts.date()
+        try:
+            return datetime.fromisoformat(str(raw_ts).replace("T", " ")).date()
+        except ValueError:
+            return None
+    return None
+
+
+def _read_sina_daily(symbols: list[str], start: date, end: date) -> pl.DataFrame:
+    """用 Sina 实时行情生成当日/最新交易日日 K，作为 K 线页的首选实时来源。"""
+    quotes = fetch_sina_realtime(symbols=symbols)
+    if quotes.is_empty():
+        return pl.DataFrame()
+
+    records: list[dict] = []
+    for row in quotes.iter_rows(named=True):
+        open_price = _positive_price(row.get("open"))
+        high_price = _positive_price(row.get("high"))
+        low_price = _positive_price(row.get("low"))
+        close_price = _positive_price(row.get("last_price") if row.get("last_price") is not None else row.get("close"))
+        trade_date = _quote_trade_date(row)
+        if not row.get("symbol") or trade_date is None or None in (open_price, high_price, low_price, close_price):
+            continue
+        records.append({
+            "symbol": row.get("symbol"),
+            "date": trade_date,
+            "open": open_price,
+            "high": high_price,
+            "low": low_price,
+            "close": close_price,
+            "volume": _finite_float(row.get("volume")) or 0.0,
+            "amount": _finite_float(row.get("amount")) or 0.0,
+        })
+    if not records:
+        return pl.DataFrame()
+
+    latest_quote_date = max(r["date"] for r in records)
+    if start == end == date.today():
+        filtered = [r for r in records if r["date"] == latest_quote_date]
+    else:
+        filtered = [r for r in records if start <= r["date"] <= end]
+    if not filtered:
+        return pl.DataFrame()
+    return (
+        pl.DataFrame(filtered)
+        .with_columns(pl.col("date").cast(pl.Date))
+        .select(["symbol", "date", "open", "high", "low", "close", "volume", "amount"])
+        .unique(subset=["symbol", "date"], keep="last")
+        .sort(["symbol", "date"])
+    )
 
 
 def _exchange_from_symbol_expr() -> pl.Expr:
@@ -170,8 +254,14 @@ def get_level1_daily(
     start, end = _date_bounds(start_time, end_time)
 
     cached = _read_cached_daily(normalized, start, end)
-    if not cached.is_empty():
-        return cached
+    sina_daily = _read_sina_daily(normalized, start, end)
+    frames = [df for df in (cached, sina_daily) if not df.is_empty()]
+    if frames:
+        return (
+            pl.concat(frames, how="diagonal_relaxed")
+            .unique(subset=["symbol", "date"], keep="last")
+            .sort(["symbol", "date"])
+        )
 
     # 大范围历史日 K 不在 Level1 按需聚合中展开，避免一次请求触发大量 TCP 下载。
     if len(normalized) > 20 or (end - start).days > 10:

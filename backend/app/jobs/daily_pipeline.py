@@ -115,6 +115,15 @@ def run_now(
     if not pull_a_share:
         emit("sync_daily", 45, "已跳过 A 股日K同步(拉取内容未勾选)")
         logger.info("sync_daily: skipped (pipeline_pull_a_share=False)")
+    elif _prefs.get_daily_data_provider() != "tickflow":
+        # 本地数据源不提供可承受的全市场历史日 K 批量接口；日 K 由 Sina 实时行情生成当日蜡烛。
+        emit("sync_daily", 12, "获取本地实时行情生成当日日K…")
+        written_daily = kline_sync.sync_daily_by_quotes(repo)
+        new_daily_days = 1 if written_daily > 0 else 0
+        if written_daily > 0:
+            _drop_enriched_date_partition(repo, repo.latest_daily_date())
+        emit("sync_daily", 45, f"日K 完成,{written_daily} 只标的")
+        logger.info("sync_daily: local quotes flushed, %d symbols", written_daily)
     elif today_exists and capset.has(Cap.QUOTE_POOL):
         # 付费档:今天有数据(QuoteService 已落盘)→ 实时行情覆写,确保最新。
         # free/none 档无 quote.pool 能力,即便今天已有数据(如从 expert 降级),
@@ -267,8 +276,8 @@ def run_now(
         new_enriched_days = len(list(enriched_dir.glob("date=*")))
         emit("compute_enriched", 88, f"enriched 完成,覆盖 {new_enriched_days} 天")
         logger.info("compute_enriched: full rebuild done, %d days", new_enriched_days)
-    elif forward_incremental:
-        # 往后新增日期: 增量补新区块 + 受影响个股全日期重算
+    elif forward_incremental or new_daily_days > 0:
+        # 往后新增日期或本地实时刷新: 增量补新区块 + 受影响个股全日期重算。
         symbols_to_recompute = list(set(affected_symbols)) if affected_symbols else []
         emit("compute_enriched", 65,
              f"增量计算 enriched (新日期 + {len(symbols_to_recompute)} 只个股重算)…"
@@ -501,6 +510,24 @@ def _refresh_single_view(repo: KlineRepository, name: str) -> None:
         )
     except Exception as e:  # noqa: BLE001
         logger.warning("refresh view %s failed: %s", name, e)
+
+
+def _drop_enriched_date_partition(repo: KlineRepository, target_date) -> None:
+    """删除指定日期的 enriched 分区，让实时刷新后的当日 K 线重新计算指标。"""
+    if target_date is None:
+        return
+    ds = target_date.isoformat() if hasattr(target_date, "isoformat") else str(target_date)
+    partition = repo.store.data_dir / "kline_daily_enriched" / f"date={ds}"
+    if not partition.exists():
+        return
+    try:
+        for path in partition.iterdir():
+            if path.is_file():
+                path.unlink()
+        partition.rmdir()
+        logger.info("dropped enriched partition for realtime refresh: %s", ds)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("drop enriched partition failed for %s: %s", ds, e)
 
 
 def _resolve_minute_symbols(capset: CapabilitySet) -> list[str]:

@@ -8,9 +8,10 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import polars as pl
 
@@ -27,6 +28,45 @@ logger = logging.getLogger(__name__)
 CANONICAL_DAILY_COLS = [
     "symbol", "date", "open", "high", "low", "close", "volume", "amount",
 ]
+
+
+def _finite_float(value) -> float | None:
+    """将行情字段转为有限浮点数，非法数值统一视为空值。"""
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _positive_price(value) -> float | None:
+    """解析价格字段，过滤 0、负数、NaN 和无穷大。"""
+    parsed = _finite_float(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
+def _quote_trade_date(row: dict) -> date | None:
+    """从实时行情记录中提取交易日期，避免非交易日写入系统日期分区。"""
+    raw_date = row.get("date")
+    if raw_date:
+        if isinstance(raw_date, date) and not isinstance(raw_date, datetime):
+            return raw_date
+        try:
+            return datetime.fromisoformat(str(raw_date)[:10]).date()
+        except ValueError:
+            pass
+
+    raw_ts = row.get("timestamp")
+    if raw_ts:
+        if isinstance(raw_ts, datetime):
+            return raw_ts.date()
+        try:
+            return datetime.fromisoformat(str(raw_ts).replace("T", " ")).date()
+        except ValueError:
+            return None
+    return None
 
 
 def _normalize_daily(df_in, default_symbol: str | None = None) -> pl.DataFrame:
@@ -209,19 +249,31 @@ def sync_daily_by_quotes(repo: KlineRepository) -> int:
             return 0
         records = []
         for q in quotes.iter_rows(named=True):
+            open_price = _positive_price(q.get("open"))
+            high_price = _positive_price(q.get("high"))
+            low_price = _positive_price(q.get("low"))
+            close_price = _positive_price(q.get("last_price") if q.get("last_price") is not None else q.get("close"))
+            trade_date = _quote_trade_date(q) or _date.today()
+            if not q.get("symbol") or None in (open_price, high_price, low_price, close_price):
+                continue
             records.append({
                 "symbol": q.get("symbol"),
-                "open": q.get("open"),
-                "high": q.get("high"),
-                "low": q.get("low"),
-                "close": q.get("last_price") or q.get("close"),
-                "volume": q.get("volume"),
-                "amount": q.get("amount"),
+                "date": trade_date,
+                "open": open_price,
+                "high": high_price,
+                "low": low_price,
+                "close": close_price,
+                "volume": _finite_float(q.get("volume")) or 0.0,
+                "amount": _finite_float(q.get("amount")) or 0.0,
             })
-        daily_df = pl.DataFrame(records).with_columns(pl.lit(_date.today()).cast(pl.Date).alias("date"))
+        if not records:
+            return 0
+        latest_trade_date = max(r["date"] for r in records)
+        daily_df = pl.DataFrame([r for r in records if r["date"] == latest_trade_date])
+        daily_df = daily_df.with_columns(pl.col("date").cast(pl.Date))
         daily_df = filter_halt_days(daily_df)
         repo.flush_live_daily(daily_df)
-        logger.info("sync_daily_by_quotes(local): %d symbols flushed", daily_df.height)
+        logger.info("sync_daily_by_quotes(local): %d symbols flushed for %s", daily_df.height, latest_trade_date)
         return daily_df.height
 
     tf = get_client()
@@ -238,14 +290,20 @@ def sync_daily_by_quotes(repo: KlineRepository) -> int:
     records = []
     for q in resp:
         ext = q.get("ext") or {}
+        open_price = _positive_price(q.get("open"))
+        high_price = _positive_price(q.get("high"))
+        low_price = _positive_price(q.get("low"))
+        close_price = _positive_price(q.get("last_price"))
+        if not q.get("symbol") or None in (open_price, high_price, low_price, close_price):
+            continue
         records.append({
             "symbol": q.get("symbol"),
-            "open": q.get("open"),
-            "high": q.get("high"),
-            "low": q.get("low"),
-            "close": q.get("last_price"),
-            "volume": q.get("volume"),
-            "amount": q.get("amount"),
+            "open": open_price,
+            "high": high_price,
+            "low": low_price,
+            "close": close_price,
+            "volume": _finite_float(q.get("volume")) or 0.0,
+            "amount": _finite_float(q.get("amount")) or 0.0,
         })
 
     df = pl.DataFrame(records)

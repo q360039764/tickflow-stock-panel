@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 from datetime import datetime
 from pathlib import Path
@@ -14,9 +15,10 @@ from app.data_providers.local_market_codes import to_level1_code, to_panel_symbo
 
 logger = logging.getLogger(__name__)
 
-# Sina HTTP 接口返回字段顺序，与第二项目 CSV fields 保持一致。
+# Sina HTTP 接口字段顺序：名称、今开、昨收、当前价、最高、最低...。
+# 第二项目 sina-real-time 的原始 CSV 与 sinajs.cn 返回内容均按此顺序保存。
 SINA_FIELDS = [
-    "name", "prev_close", "open", "last_price", "high", "low", "bid1_price", "ask1_price",
+    "name", "open", "prev_close", "last_price", "high", "low", "bid1_price", "ask1_price",
     "volume", "amount", "bid1_volume_l2", "bid1_price_l2", "bid2_volume", "bid2_price",
     "bid3_volume", "bid3_price", "bid4_volume", "bid4_price", "bid5_volume", "bid5_price",
     "ask1_volume_l2", "ask1_price_l2", "ask2_volume", "ask2_price", "ask3_volume", "ask3_price",
@@ -56,6 +58,43 @@ def _chunks(items: list[str], size: int) -> list[list[str]]:
     return [items[i:i + size] for i in range(0, len(items), size)]
 
 
+def _parse_sina_response(text: str) -> list[dict]:
+    """解析 Sina 批量响应文本，返回标准实时行情记录列表。"""
+    records: list[dict] = []
+    for match in _SINA_LINE_RE.finditer(text):
+        parsed = _parse_sina_line(match.group(1), match.group(2))
+        if parsed is not None:
+            records.append(parsed)
+    return records
+
+
+def _fetch_sina_chunk(
+    client: httpx.Client,
+    url_template: str,
+    chunk: list[str],
+    min_chunk_size: int = 50,
+) -> list[dict]:
+    """获取单个 Sina 批次；失败时拆分为更小批次，避免整次全市场同步归零。"""
+    if not chunk:
+        return []
+    try:
+        url = url_template.format(codes=",".join(chunk))
+        resp = client.get(url)
+        resp.raise_for_status()
+        text = resp.content.decode("gb18030", errors="ignore")
+        return _parse_sina_response(text)
+    except Exception as e:  # noqa: BLE001
+        if len(chunk) <= min_chunk_size:
+            logger.warning("Sina HTTP 批次失败: size=%d, first=%s, error=%s", len(chunk), chunk[0], e)
+            return []
+        mid = len(chunk) // 2
+        logger.warning("Sina HTTP 批次失败，拆分重试: size=%d, first=%s, error=%s", len(chunk), chunk[0], e)
+        return (
+            _fetch_sina_chunk(client, url_template, chunk[:mid], min_chunk_size)
+            + _fetch_sina_chunk(client, url_template, chunk[mid:], min_chunk_size)
+        )
+
+
 def _to_float(value: str | None) -> float | None:
     if value is None:
         return None
@@ -63,7 +102,8 @@ def _to_float(value: str | None) -> float | None:
     if not text:
         return None
     try:
-        return float(text)
+        value = float(text)
+        return value if math.isfinite(value) else None
     except ValueError:
         return None
 
@@ -115,6 +155,7 @@ def _parse_sina_line(sina_code: str, fields: str) -> dict | None:
         "change_amount": change_amount,
         "change_pct": change_pct,
         "amplitude": amplitude,
+        "date": row.get("date"),
         "timestamp": _parse_timestamp(row.get("date", ""), row.get("time", "")),
         "session": row.get("status"),
     }
@@ -138,24 +179,13 @@ def fetch_sina_realtime(symbols: list[str] | None = None) -> pl.DataFrame:
         "Referer": "https://finance.sina.com.cn",
         "User-Agent": settings.ai_user_agent,
     }
-    batch_size = int(getattr(settings, "sina_http_batch_size", 800) or 800)
+    batch_size = min(200, int(getattr(settings, "sina_http_batch_size", 800) or 800))
     timeout = float(getattr(settings, "sina_http_timeout_s", 8.0) or 8.0)
     url_template = str(getattr(settings, "sina_http_url", "https://hq.sinajs.cn/list={codes}"))
 
-    try:
-        with httpx.Client(timeout=timeout, headers=headers) as client:
-            for chunk in _chunks(sina_codes, batch_size):
-                url = url_template.format(codes=",".join(chunk))
-                resp = client.get(url)
-                resp.raise_for_status()
-                text = resp.content.decode("gb18030", errors="ignore")
-                for match in _SINA_LINE_RE.finditer(text):
-                    parsed = _parse_sina_line(match.group(1), match.group(2))
-                    if parsed is not None:
-                        records.append(parsed)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Sina HTTP 实时行情获取失败: %s", e)
-        return pl.DataFrame()
+    with httpx.Client(timeout=timeout, headers=headers) as client:
+        for chunk in _chunks(sina_codes, batch_size):
+            records.extend(_fetch_sina_chunk(client, url_template, chunk))
 
     if not records:
         return pl.DataFrame()

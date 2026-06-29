@@ -45,36 +45,54 @@ interface Props {
   extColumns?: string
 }
 
+function toFiniteNumber(value: unknown): number | null {
+  // K 线价格与指标统一入口：过滤 null、NaN 和无穷大，避免图表渲染异常。
+  if (value == null || value === '') return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
 function isValidRow(r: any): boolean {
-  return r && r.date != null && r.open != null && r.close != null
+  const open = toFiniteNumber(r?.open)
+  const high = toFiniteNumber(r?.high)
+  const low = toFiniteNumber(r?.low)
+  const close = toFiniteNumber(r?.close)
+  return !!r && r.date != null && open != null && high != null && low != null && close != null
+    && open > 0 && high > 0 && low > 0 && close > 0
 }
 
 export function toOHLC(rows: KlineRow[]): OHLC[] {
   return rows
     .filter(isValidRow)
-    .map(r => ({
-      date: typeof r.date === 'string' ? r.date.slice(0, 10) : String(r.date),
-      open: Number(r.open),
-      high: Number(r.high),
-      low: Number(r.low),
-      close: Number(r.close),
-      volume: Number(r.volume ?? 0),
-      ma5: r.ma5 != null ? Number(r.ma5) : null,
-      ma10: r.ma10 != null ? Number(r.ma10) : null,
-      ma20: r.ma20 != null ? Number(r.ma20) : null,
-      ma60: r.ma60 != null ? Number(r.ma60) : null,
-      macd_dif: r.macd_dif != null ? Number(r.macd_dif) : null,
-      macd_dea: r.macd_dea != null ? Number(r.macd_dea) : null,
-      macd_hist: r.macd_hist != null ? Number(r.macd_hist) : null,
-      rsi_6: r.rsi_6 != null ? Number(r.rsi_6) : null,
-      rsi_14: r.rsi_14 != null ? Number(r.rsi_14) : null,
-      rsi_24: r.rsi_24 != null ? Number(r.rsi_24) : null,
-      kdj_k: r.kdj_k != null ? Number(r.kdj_k) : null,
-      kdj_d: r.kdj_d != null ? Number(r.kdj_d) : null,
-      kdj_j: r.kdj_j != null ? Number(r.kdj_j) : null,
-      boll_upper: r.boll_upper != null ? Number(r.boll_upper) : null,
-      boll_lower: r.boll_lower != null ? Number(r.boll_lower) : null,
-    }))
+    .map(r => {
+      const open = toFiniteNumber(r.open)!
+      const high = toFiniteNumber(r.high)!
+      const low = toFiniteNumber(r.low)!
+      const close = toFiniteNumber(r.close)!
+      return {
+        date: typeof r.date === 'string' ? r.date.slice(0, 10) : String(r.date),
+        open,
+        high,
+        low,
+        close,
+        volume: toFiniteNumber(r.volume) ?? 0,
+        ma5: toFiniteNumber(r.ma5),
+        ma10: toFiniteNumber(r.ma10),
+        ma20: toFiniteNumber(r.ma20),
+        ma60: toFiniteNumber(r.ma60),
+        macd_dif: toFiniteNumber(r.macd_dif),
+        macd_dea: toFiniteNumber(r.macd_dea),
+        macd_hist: toFiniteNumber(r.macd_hist),
+        rsi_6: toFiniteNumber(r.rsi_6),
+        rsi_14: toFiniteNumber(r.rsi_14),
+        rsi_24: toFiniteNumber(r.rsi_24),
+        kdj_k: toFiniteNumber(r.kdj_k),
+        kdj_d: toFiniteNumber(r.kdj_d),
+        kdj_j: toFiniteNumber(r.kdj_j),
+        boll_upper: toFiniteNumber(r.boll_upper),
+        boll_lower: toFiniteNumber(r.boll_lower),
+      }
+    })
 }
 
 function buildLimitUpMarkers(rows: KlineRow[]): ChartMarker[] {
