@@ -55,7 +55,8 @@ def _strategy_detail(s: StrategyDef, overrides: dict | None = None) -> dict:
     """策略详情（含用户覆盖）"""
     bf = {**s.basic_filter}
     scoring = dict(s.meta.get("scoring", {}))
-    params_defaults = {p["id"]: p["default"] for p in s.meta.get("params", [])}
+    param_defs = [p for p in s.meta.get("params", []) if isinstance(p, dict) and p.get("id")]
+    params_defaults = {p["id"]: p.get("default") for p in param_defs}
 
     if overrides:
         if overrides.get("basic_filter"):
@@ -78,7 +79,7 @@ def _strategy_detail(s: StrategyDef, overrides: dict | None = None) -> dict:
         "source": s.source,
         "version": s.meta.get("version", "1.0.0"),
         "basic_filter": bf,
-        "params": s.meta.get("params", []),
+        "params": param_defs,
         "params_defaults": params_defaults,
         "scoring": scoring,
         "entry_signals": s.entry_signals,

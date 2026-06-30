@@ -74,6 +74,7 @@ export function Indices() {
   const [range, setRange] = useState(defaultRange)
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
   const [linkedPrice, setLinkedPrice] = useState<number | null>(null)
+  const [syncDailyJobId, setSyncDailyJobId] = useState<string | null>(null)
 
   // 分时数据需 Pro+ (kline.minute.batch) 能力
   const caps = useCapabilities()
@@ -142,12 +143,34 @@ export function Indices() {
 
   const syncDaily = useMutation({
     mutationFn: () => api.syncIndexDaily(365),
-    onSuccess: () => {
+    onSuccess: ({ job_id }) => {
+      setSyncDailyJobId(job_id)
+      qc.invalidateQueries({ queryKey: QK.pipelineJobs })
       qc.invalidateQueries({ queryKey: QK.indexList })
       qc.invalidateQueries({ queryKey: QK.indexQuotes })
       qc.invalidateQueries({ queryKey: ['index-daily'] })
     },
   })
+
+  const syncDailyJob = useQuery({
+    queryKey: QK.pipelineJob(syncDailyJobId ?? ''),
+    queryFn: () => api.pipelineJob(syncDailyJobId!),
+    enabled: !!syncDailyJobId,
+    refetchInterval: (q: any) => {
+      const j = q.state.data
+      return j && (j.status === 'succeeded' || j.status === 'failed') ? false : 1_000
+    },
+  })
+
+  useEffect(() => {
+    const status = syncDailyJob.data?.status
+    if (status !== 'succeeded' && status !== 'failed') return
+    qc.invalidateQueries({ queryKey: QK.indexList })
+    qc.invalidateQueries({ queryKey: QK.indexQuotes })
+    qc.invalidateQueries({ queryKey: ['index-daily'] })
+    qc.invalidateQueries({ queryKey: QK.pipelineJobs })
+    setSyncDailyJobId(null)
+  }, [syncDailyJob.data?.status, qc])
 
   const quoteBySymbol = useMemo(() => {
     const m = new Map<string, any>()
@@ -157,6 +180,9 @@ export function Indices() {
   const selectedQuote = selectedSymbol ? quoteBySymbol.get(selectedSymbol) : null
   const selectedQuoteValue = selectedQuote?.last_price ?? selectedQuote?.price ?? selectedQuote?.close
   const selectedQuotePct = selectedQuote?.change_pct ?? selectedQuote?.pct
+  const syncDailyRunning = syncDaily.isPending
+    || syncDailyJob.data?.status === 'pending'
+    || syncDailyJob.data?.status === 'running'
 
   const chartRows = useMemo(() => toOHLC(daily.data?.rows ?? []), [daily.data?.rows])
   const selectedInfo = [...topRows, ...listRows].find(r => r.symbol === selectedSymbol) || daily.data?.index_info
@@ -221,10 +247,10 @@ export function Indices() {
           </button>
           <button
             onClick={() => syncDaily.mutate()}
-            disabled={syncDaily.isPending}
+            disabled={syncDailyRunning}
             className="inline-flex items-center gap-1.5 rounded-btn bg-accent px-3 py-1.5 text-xs font-medium text-base hover:bg-accent/90 disabled:opacity-50"
           >
-            {syncDaily.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            {syncDailyRunning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
             同步指数日K
           </button>
         </div>

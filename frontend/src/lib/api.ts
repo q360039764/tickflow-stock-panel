@@ -987,7 +987,7 @@ export const api = {
   syncIndexInstruments: () =>
     request<{ status: string; count: number }>('/api/index/sync_instruments', { method: 'POST' }),
   syncIndexDaily: (days = 365) =>
-    request<{ status: string; index_count: number; rows_written: number }>(
+    request<{ status: string; job_id: string }>(
       `/api/index/sync_daily?days=${days}`,
       { method: 'POST' },
     ),

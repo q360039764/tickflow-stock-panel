@@ -1,6 +1,8 @@
 """指数 API。"""
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures as _cf
 import logging
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -8,13 +10,16 @@ from typing import Optional
 import polars as pl
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from app.api.data import invalidate_storage_cache
 from app.indicators.pipeline import compute_enriched
 from app.services import index_sync, kline_sync
+from app.services.pipeline_jobs import job_store
 from app.tickflow.capabilities import Cap
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/index", tags=["index"])
+_long_task_executor = _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="long-task")
 
 
 def _index_info(repo, symbol: str) -> dict:
@@ -109,7 +114,7 @@ def get_index_minute(
     symbol: str = Query(..., description="指数代码, 如 000001.SH"),
     trade_date: date | None = Query(None, alias="date", description="交易日期, 默认今天"),
 ):
-    """实时读取指数分钟 K。不写入股票分钟 parquet。"""
+    """实时读取指数分钟 K。"""
     repo = request.app.state.repo
     info = _index_info(repo, symbol)
     day = trade_date or date.today()
@@ -133,17 +138,73 @@ def sync_index_instruments(request: Request):
 
 
 @router.post("/sync_daily")
-def sync_index_daily(
+async def sync_index_daily(
     request: Request,
     days: int = Query(365, ge=30, le=5000),
 ):
-    """同步指数日K到独立 parquet。"""
+    """同步指数日 K 到独立 parquet。"""
     repo = request.app.state.repo
     capset = request.app.state.capabilities
     if not capset.has(Cap.KLINE_DAILY_BATCH):
         raise HTTPException(status_code=403, detail="需要 Pro+ 权限 (batch K-line)")
+
     end = datetime.now()
     start = end - timedelta(days=days)
-    count = index_sync.sync_index_instruments(repo)
-    rows = index_sync.sync_and_persist_index_daily(repo, capset, start_date=start, end_date=end)
-    return {"status": "ok", "index_count": count, "rows_written": rows}
+
+    job_id = job_store.create()
+    existing = job_store.get(job_id)
+    if existing and existing["status"] == "running":
+        return {"status": "reused", "job_id": job_id}
+
+    async def task() -> None:
+        job_store.start(job_id)
+        loop = asyncio.get_running_loop()
+
+        def progress(stage: str, pct: int, msg: str, stage_pct: int | None = None,
+                     skip_log: bool = False) -> None:
+            job_store.progress(job_id, stage, pct, msg, stage_pct=stage_pct, skip_log=skip_log)
+
+        try:
+            progress("sync_index", 5, "同步指数标的列表…")
+            index_count = await loop.run_in_executor(
+                _long_task_executor,
+                lambda: index_sync.sync_index_instruments(repo),
+            )
+
+            progress("sync_index", 12, f"同步指数日K [{start.date()} ~ {end.date()}]…")
+
+            def _chunk_done(cur: int, total: int, chunk_rows: int, rows_written: int) -> None:
+                pct = 12 + int(78 * cur / total) if total else 90
+                progress(
+                    "sync_index",
+                    pct,
+                    f"指数日K 批次 {cur}/{total}，新增 {chunk_rows} 行",
+                    stage_pct=int(100 * cur / total) if total else 100,
+                    skip_log=True,
+                )
+
+            rows_written = await loop.run_in_executor(
+                _long_task_executor,
+                lambda: index_sync.sync_and_persist_index_daily(
+                    repo,
+                    capset,
+                    start_date=start,
+                    end_date=end,
+                    on_chunk_done=_chunk_done,
+                ),
+            )
+            progress("sync_index", 95, "刷新指数视图…")
+            repo.refresh_index_views()
+            repo.refresh_cache()
+            invalidate_storage_cache()
+            job_store.succeed(job_id, {
+                "index_count": index_count,
+                "rows_written": rows_written,
+            })
+        except Exception as e:  # noqa: BLE001
+            logger.exception("sync_index_daily failed")
+            job_store.fail(job_id, str(e))
+            invalidate_storage_cache()
+
+    asyncio.create_task(task())
+    return {"status": "started", "job_id": job_id}

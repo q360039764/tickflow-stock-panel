@@ -194,6 +194,7 @@ def sync_and_persist_index_daily(
     start_date: datetime | None = None,
     end_date: datetime | None = None,
     symbols_override: list[str] | None = None,
+    on_chunk_done=None,
 ) -> int:
     """同步指数/ETF 日K到独立 parquet,并计算 enriched。
 
@@ -241,6 +242,8 @@ def sync_and_persist_index_daily(
             end_time=end_time,
         )
         if raw.is_empty():
+            if on_chunk_done is not None:
+                on_chunk_done(i + 1, len(chunks), 0, total_rows)
             continue
 
         repo.append_index_daily(raw)
@@ -248,6 +251,8 @@ def sync_and_persist_index_daily(
         repo.append_index_enriched(enriched)
         total_rows += raw.height
         logger.info("index/etf daily synced: %d/%d chunks, +%d rows", i + 1, len(chunks), raw.height)
+        if on_chunk_done is not None:
+            on_chunk_done(i + 1, len(chunks), raw.height, total_rows)
         del raw, enriched
         gc.collect()
     repo.refresh_index_views()

@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from app.indicators.pipeline import compute_enriched_single
+import polars as pl
+
+from app.indicators.pipeline import compute_enriched
 from app.services import kline_sync
 
 logger = logging.getLogger(__name__)
@@ -70,6 +72,54 @@ def instruments_names(request: Request, symbols: list[str]):
     return {"names": names}
 
 
+def _enriched_rows_from_provider(repo, symbol: str, start: date, end: date, days: int) -> list[dict]:
+    """按需从当前日 K provider 获取历史数据，并带 instruments 计算换手率与指标。"""
+    # provider 额外读取一段前置历史，避免 MA、MACD 等指标只按可见区间从零开始计算。
+    fetch_start = start - timedelta(days=max(180, days))
+    start_time = datetime.combine(fetch_start, datetime.min.time())
+    end_time = datetime.combine(end, datetime.max.time())
+    raw = kline_sync.sync_daily_batch([symbol], count=days + 240, start_time=start_time, end_time=end_time)
+    if raw.is_empty():
+        return []
+
+    instruments = repo.get_instruments()
+    enriched = compute_enriched(raw, instruments=instruments)
+    if enriched.is_empty():
+        visible = raw.filter((pl.col("date") >= start) & (pl.col("date") <= end))
+        return visible.tail(days).to_dicts()
+
+    visible = enriched.filter((pl.col("date") >= start) & (pl.col("date") <= end))
+    return visible.tail(days).to_dicts()
+
+
+def _row_date_key(row: dict) -> tuple[str | None, str] | None:
+    """生成 K 线合并键，日期统一为 YYYY-MM-DD，便于同日覆盖。"""
+    raw_date = row.get("date")
+    if raw_date is None:
+        return None
+    date_key = raw_date.isoformat() if hasattr(raw_date, "isoformat") else str(raw_date)
+    return row.get("symbol"), date_key[:10]
+
+
+def _merge_kline_rows(local_rows: list[dict], provider_rows: list[dict]) -> list[dict]:
+    """以本地历史为基础，用 provider 同日数据覆盖旧缓存，并保留 provider 缺失的本地字段。"""
+    merged: dict[tuple[str | None, str], dict] = {}
+    for item in local_rows:
+        key = _row_date_key(item)
+        if key is not None:
+            merged[key] = dict(item)
+
+    for item in provider_rows:
+        key = _row_date_key(item)
+        if key is None:
+            continue
+        base = merged.get(key, {})
+        updates = {name: value for name, value in item.items() if value is not None}
+        merged[key] = {**base, **updates}
+
+    return sorted(merged.values(), key=lambda item: str(item.get("date")))
+
+
 def _get_stock_info(repo, symbol: str) -> dict:
     """从 instruments 视图查标的名称 + 股本。"""
     try:
@@ -104,8 +154,6 @@ def get_daily(
     - ext_columns: 可选，动态 LEFT JOIN 扩展数据表，结果平铺到 stock_info.ext 下
       (key 为 "{config_id}__{field_name}")，供日K信息条等场景展示自定义字段
     """
-    import polars as pl
-
     repo = request.app.state.repo
     end = date.fromisoformat(end_date) if end_date else date.today()
     if start_date:
@@ -121,19 +169,23 @@ def get_daily(
 
     if df.is_empty():
         try:
-            raw = kline_sync.sync_daily_batch([symbol], count=days + 30)
+            rows = _enriched_rows_from_provider(repo, symbol, start, end, days)
         except Exception as e:
-            raise HTTPException(status_code=502, detail=f"TickFlow fetch failed: {e}") from e
-        if raw.is_empty():
+            raise HTTPException(status_code=502, detail=f"Kline fetch failed: {e}") from e
+        if not rows:
             return {"symbol": symbol, "name": stock_name, "stock_info": stock_info, "rows": []}
-        enriched = compute_enriched_single(raw)
-        rows = enriched.tail(days).to_dicts()
         # 即使 live 模式也尝试追加实时蜡烛
         rows = _maybe_inject_live_candle(request, symbol, rows)
         resp = {"symbol": symbol, "name": stock_name, "stock_info": stock_info, "rows": rows, "source": "live"}
         return _attach_ext(resp, repo, symbol, ext_columns)
 
     rows = df.to_dicts()
+    try:
+        provider_rows = _enriched_rows_from_provider(repo, symbol, start, end, days)
+        if provider_rows:
+            rows = _merge_kline_rows(rows, provider_rows)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("K 线 provider 合并失败 %s: %s", symbol, exc)
 
     # 追加/覆盖今日实时蜡烛
     rows = _maybe_inject_live_candle(request, symbol, rows)
@@ -211,6 +263,9 @@ def _maybe_inject_live_candle(request: Request, symbol: str, rows: list[dict]) -
     """如果 QuoteService 有实时 enriched 数据, 用实时数据生成今日蜡烛并追加/覆盖。"""
     qs = getattr(request.app.state, "quote_service", None)
     if not qs:
+        return rows
+    if not getattr(qs, "_fetched_at", 0):
+        # 启动时 repo 最新分区不等于实时刷新结果，避免旧缓存覆盖按需补齐后的 K 线。
         return rows
 
     df_today, enriched_date = qs.get_enriched_today()

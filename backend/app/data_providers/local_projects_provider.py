@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import logging
 import math
+import random
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
+import httpx
 import polars as pl
 
 from app.config import settings
@@ -102,6 +104,51 @@ def _positive_price(value) -> float | None:
     """解析价格字段，0、负数和非法数值视为空值。"""
     parsed = _finite_float(value)
     return parsed if parsed is not None and parsed > 0 else None
+
+
+def _eastmoney_secid(symbol: str) -> str | None:
+    """将面板股票代码转换为 Eastmoney secid。"""
+    panel_symbol = to_panel_symbol(symbol)
+    code = to_level1_code(panel_symbol)
+    if not code:
+        return None
+    if panel_symbol.endswith(".SH"):
+        return f"1.{code}"
+    if panel_symbol.endswith((".SZ", ".BJ")):
+        return f"0.{code}"
+    return None
+
+
+def _compact_date(value: date) -> str:
+    """生成 Eastmoney 历史接口使用的 YYYYMMDD 日期字符串。"""
+    return value.strftime("%Y%m%d")
+
+
+def _parse_eastmoney_kline(symbol: str, line: str) -> dict | None:
+    """解析 Eastmoney kline 单行文本，输出项目日 K 标准字段。"""
+    parts = str(line or "").split(",")
+    if len(parts) < 7:
+        return None
+    try:
+        trade_date = datetime.strptime(parts[0], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    open_price = _positive_price(parts[1])
+    close_price = _positive_price(parts[2])
+    high_price = _positive_price(parts[3])
+    low_price = _positive_price(parts[4])
+    if None in (open_price, close_price, high_price, low_price):
+        return None
+    return {
+        "symbol": symbol,
+        "date": trade_date,
+        "open": open_price,
+        "high": high_price,
+        "low": low_price,
+        "close": close_price,
+        "volume": _finite_float(parts[5]) or 0.0,
+        "amount": _finite_float(parts[6]) or 0.0,
+    }
 
 
 def _quote_trade_date(row: dict) -> date | None:
@@ -224,6 +271,54 @@ def get_level1_instruments() -> pl.DataFrame:
     return df.select(keep).drop_nulls("symbol").unique(subset=["symbol"], keep="last").sort("symbol")
 
 
+def _read_eastmoney_daily(symbols: list[str], start: date, end: date) -> pl.DataFrame:
+    """从 Eastmoney 公共历史日 K 接口补齐单股历史数据。"""
+    if not local_data_enabled() or not symbols or start > end:
+        return pl.DataFrame()
+    records: list[dict] = []
+    headers = {"User-Agent": settings.ai_user_agent, "Referer": "https://quote.eastmoney.com"}
+    timeout = float(getattr(settings, "sina_http_timeout_s", 8.0) or 8.0)
+    base_url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+    fields = "f51,f52,f53,f54,f55,f56,f57"
+    with httpx.Client(timeout=timeout, headers=headers) as client:
+        for symbol in symbols:
+            secid = _eastmoney_secid(symbol)
+            if not secid:
+                continue
+            params = {
+                "secid": secid,
+                "klt": "101",
+                "fqt": "0",
+                "beg": _compact_date(start),
+                "end": _compact_date(end),
+                "fields1": "f1,f2,f3,f4,f5,f6",
+                "fields2": fields,
+                "ut": "fa5fd1943c7b386f172d6893dbfba10b",
+                "_": str(int(datetime.now().timestamp() * 1000) + random.randint(0, 999)),
+            }
+            try:
+                resp = client.get(base_url, params=params)
+                resp.raise_for_status()
+                payload = resp.json()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Eastmoney 历史日 K 获取失败 %s: %s", symbol, exc)
+                continue
+            klines = ((payload.get("data") or {}).get("klines") or []) if isinstance(payload, dict) else []
+            for line in klines:
+                item = _parse_eastmoney_kline(to_panel_symbol(symbol), line)
+                if item and start <= item["date"] <= end:
+                    records.append(item)
+    if not records:
+        return pl.DataFrame()
+    return (
+        pl.DataFrame(records)
+        .with_columns(pl.col("date").cast(pl.Date))
+        .select(["symbol", "date", "open", "high", "low", "close", "volume", "amount"])
+        .unique(subset=["symbol", "date"], keep="last")
+        .sort(["symbol", "date"])
+    )
+
+
 def _read_cached_daily(symbols: list[str], start: date, end: date) -> pl.DataFrame:
     """从第一个项目已有日 K 缓存读取数据。"""
     daily_dir = Path(settings.data_dir) / "kline_daily"
@@ -255,7 +350,12 @@ def get_level1_daily(
 
     cached = _read_cached_daily(normalized, start, end)
     sina_daily = _read_sina_daily(normalized, start, end)
-    frames = [df for df in (cached, sina_daily) if not df.is_empty()]
+    cached_dates = set()
+    if not cached.is_empty() and "date" in cached.columns:
+        cached_dates = {value for value in cached["date"].to_list()}
+    need_history = not cached_dates or len(cached_dates) < max(3, min((end - start).days // 2, 20))
+    eastmoney_daily = _read_eastmoney_daily(normalized, start, end) if need_history else pl.DataFrame()
+    frames = [df for df in (cached, eastmoney_daily, sina_daily) if not df.is_empty()]
     if frames:
         return (
             pl.concat(frames, how="diagonal_relaxed")

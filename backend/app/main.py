@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 def _log_startup_stage(stage: str, started_at: float | None = None) -> float:
-    """记录服务启动阶段和耗时，便于排查桌面版打包后的冷启动。"""
+    """记录服务启动阶段和耗时，便于排查启动性能问题。"""
     now = time.perf_counter()
     if started_at is None:
         logger.info("启动阶段开始: %s", stage)

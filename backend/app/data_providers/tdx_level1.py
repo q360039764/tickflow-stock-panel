@@ -9,6 +9,7 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Iterable
 
+import httpx
 import polars as pl
 
 from app.config import settings
@@ -22,6 +23,8 @@ DEFAULT_STEP = 0x7530
 OFFSET_POS1 = 0x0C
 FIRST_BYTE_TIMEOUT_S = 1.0
 MAX_PAGE_COUNT = 99
+EASTMONEY_TRENDS_URL = "https://push2his.eastmoney.com/api/qt/stock/trends2/get"
+EASTMONEY_TIMEOUT_S = 8.0
 
 DEFAULT_HELLO = r"""
 00 00 00 00  00 00 2a 00  2a 00 c5 02  68 69 73 68
@@ -622,6 +625,94 @@ def ticks_to_minute_df(records: list[MarketData]) -> pl.DataFrame:
     ]).drop_nulls(["symbol", "datetime"]).sort(["symbol", "datetime"])
 
 
+def _eastmoney_secid(symbol: str) -> str:
+    """将面板 symbol 转为东方财富 secid，沪市为 1，深市和北交所按 0 处理。"""
+    panel_symbol = to_panel_symbol(symbol)
+    code = to_level1_code(panel_symbol)
+    if not code:
+        return ""
+    if panel_symbol.endswith(".SH"):
+        return f"1.{code}"
+    return f"0.{code}"
+
+
+def _to_float(value: str | None) -> float | None:
+    """解析东方财富分时字段，非法数值返回 None。"""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _fetch_eastmoney_minute(symbol: str, trade_date: date) -> pl.DataFrame:
+    """通达信 Level1 为空时，用东方财富当日分时接口补充分时 K 线。"""
+    secid = _eastmoney_secid(symbol)
+    panel_symbol = to_panel_symbol(symbol)
+    if not secid or not panel_symbol:
+        return pl.DataFrame()
+
+    params = {
+        "secid": secid,
+        "fields1": "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+        "iscr": "0",
+        "ndays": "5",
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 TickFlowStockPanel/1.0",
+        "Referer": "https://quote.eastmoney.com/",
+    }
+    try:
+        resp = httpx.get(EASTMONEY_TRENDS_URL, params=params, headers=headers, timeout=EASTMONEY_TIMEOUT_S)
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("东方财富分时回退抓取失败 %s %s: %s", symbol, trade_date, e)
+        return pl.DataFrame()
+
+    trends = ((payload or {}).get("data") or {}).get("trends") or []
+    rows: list[dict] = []
+    for item in trends:
+        parts = str(item).split(",")
+        if len(parts) < 7:
+            continue
+        try:
+            dt = datetime.strptime(parts[0], "%Y-%m-%d %H:%M")
+        except ValueError:
+            continue
+        if dt.date() != trade_date:
+            continue
+        open_price = _to_float(parts[1])
+        close_price = _to_float(parts[2])
+        high_price = _to_float(parts[3])
+        low_price = _to_float(parts[4])
+        volume = _to_float(parts[5])
+        amount = _to_float(parts[6])
+        if None in (open_price, close_price, high_price, low_price):
+            continue
+        rows.append({
+            "symbol": panel_symbol,
+            "datetime": dt,
+            "open": open_price,
+            "high": high_price,
+            "low": low_price,
+            "close": close_price,
+            "volume": volume or 0.0,
+            "amount": amount or 0.0,
+        })
+
+    if not rows:
+        return pl.DataFrame()
+    return (
+        pl.DataFrame(rows)
+        .drop_nulls(["symbol", "datetime"])
+        .unique(subset=["symbol", "datetime"], keep="last")
+        .sort(["symbol", "datetime"])
+    )
+
+
 def _iter_trade_dates(start_time: datetime | None, end_time: datetime | None) -> list[date]:
     end_day = end_time.date() if end_time else date.today()
     start_day = start_time.date() if start_time else end_day
@@ -690,6 +781,8 @@ def fetch_level1_minute(
         for symbol in missing:
             records = fetch_level1_ticks(symbol, trade_day)
             minute_df = ticks_to_minute_df(records)
+            if minute_df.is_empty():
+                minute_df = _fetch_eastmoney_minute(symbol, trade_day)
             if not minute_df.is_empty():
                 _write_minute_cache(trade_day, minute_df)
                 day_frames.append(minute_df)

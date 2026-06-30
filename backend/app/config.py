@@ -1,73 +1,23 @@
-"""全局配置 — 从环境变量 / .env 读取。"""
+"""全局配置：从环境变量或项目根目录的 `.env` 读取。"""
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# ── 运行环境检测 ──────────────────────────────────────────
-# PyInstaller 打包后: __file__ 指向临时解压目录 _MEIPASS, 不能作为路径基准。
-# 此时:
-#   - 只读资源 (tiers.yaml / 前端 dist) 放在 _MEIPASS 内
-#   - 可写用户数据 (data_dir) 放在可执行文件旁的用户目录
-# 非 frozen 模式 (开发/Docker): 保持原有 __file__ 推导, 行为完全不变。
-_IS_FROZEN = getattr(sys, "frozen", False)
-
-
-def _user_data_root() -> Path:
-    """桌面版用户数据根目录。
-
-    定位策略 (按优先级):
-      1. 环境变量 DATA_DIR (pydantic-settings 自动注入到 settings.data_dir, 不在此处理)
-      2. 打包桌面版: exe 同级的 data/ 子目录 (<安装目录>/data/)
-         —— 与程序同处一个总目录 (用户选择的安装目录), 视觉直观, 便于备份/迁移。
-      3. 非 frozen (开发模式): 项目根 data/
-
-    为什么不用 platformdirs 默认 (%LOCALAPPDATA%) 作为主路径:
-      - 落在 C 盘系统目录, 用户不易察觉, 占系统盘空间
-      - 用户期望「数据跟随程序」(便于备份/迁移)
-    为什么放 {app}/data (exe 旁的 data/) 而非 {app} 外的兄弟目录:
-      - 用户体验: 用户选了安装目录, 自然期望「程序和数据都在这」, 单一总目录更直观。
-      - 数据安全: Inno Setup 覆盖安装(升级)时只往 {app} 写新程序文件, 不会清空
-        目录里不在安装清单上的运行时文件 (data/ 即此类), 故覆盖安装不丢数据。
-        (注意: 卸载时需在 .iss 中豁免 data/, 见 packaging/tickflow.iss 的 [UninstallDelete]。)
-    旧版本数据迁移: 见 DataStore._migrate_legacy_data_dir(), 老用户首次启动自动搬迁。
-    """
-    # 打包桌面版: exe 同级的 data/ 子目录 (与程序同一总目录, 覆盖安装不丢数据)
-    if _IS_FROZEN:
-        exe_dir = Path(sys.executable).resolve().parent
-        return exe_dir / "data"
-
-    # 开发模式: 项目根 data/
-    return _PROJECT_ROOT / "data"
-
-
-def _resource_root() -> Path:
-    """只读资源根目录。
-
-    frozen: PyInstaller 解压目录 (_MEIPASS)
-    非 frozen: 项目根目录 (源码树)
-    """
-    if _IS_FROZEN:
-        # sys._MEIPASS 是 PyInstaller 注入的解压根
-        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
-    return Path(__file__).resolve().parent.parent.parent
-
 
 def _project_root() -> Path:
-    """项目根目录 (非 frozen 用)。"""
+    """返回仓库根目录，用于解析默认数据和静态资源路径。"""
     return Path(__file__).resolve().parent.parent.parent
 
 
 _PROJECT_ROOT = _project_root()
-_RESOURCE_ROOT = _resource_root()
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=str(_RESOURCE_ROOT / ".env") if not _IS_FROZEN else ".env",
+        env_file=str(_PROJECT_ROOT / ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -80,8 +30,7 @@ class Settings(BaseSettings):
     ai_base_url: str = "https://api.alysc.top"
     ai_api_key: str = ""
     ai_model: str = "gpt-5.5"
-    # 默认浏览器风格 UA,绕过 Cloudflare 等 CDN/WAF 的 Bot 拦截(Issue #8)。
-    # 用户可在 AI 设置页按需修改。
+    # 默认浏览器 User-Agent，用于兼容部分 OpenAI 风格网关。
     ai_user_agent: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -94,11 +43,12 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     backtest_range_guard: bool = False
 
-    # Data — frozen: exe 同级 data/ 子目录; 非 frozen: 项目根 data/
-    # (均可被环境变量 DATA_DIR 覆盖, pydantic-settings 自动注入)
-    data_dir: Path = _user_data_root()
+    # 路径配置，均允许通过环境变量覆盖。
+    data_dir: Path = _PROJECT_ROOT / "data"
+    tiers_yaml: Path = _PROJECT_ROOT / "tiers.yaml"
+    static_dir: Path = _PROJECT_ROOT / "frontend" / "dist"
 
-    # Local market data — 内置 Sina HTTP 与通达信 Level1 TCP 采集配置。
+    # Local market data
     local_projects_root: Path = _PROJECT_ROOT.parent
     sina_realtime_data_dir: Path = _PROJECT_ROOT.parent / "sina-real-time" / "data"
     sina_http_url: str = "https://hq.sinajs.cn/list={codes}"
@@ -114,33 +64,26 @@ class Settings(BaseSettings):
     level1_clickhouse_password: str = "stock_pass"
     level1_clickhouse_timeout_s: float = 30.0
 
-    # tiers.yaml 路径 — frozen: 资源目录内; 非 frozen: 项目根目录
-    tiers_yaml: Path = _RESOURCE_ROOT / "tiers.yaml" if _IS_FROZEN else _PROJECT_ROOT / "tiers.yaml"
-
-    # 静态文件(前端 dist) — frozen: 资源目录的 static/; 非 frozen: frontend/dist
-    static_dir: Path = _RESOURCE_ROOT / "static" if _IS_FROZEN else (_PROJECT_ROOT / "frontend" / "dist")
-
-    # 桌面版种子数据 — frozen: 随包资源 seed_data/; 非 frozen: 项目 data/。
-    desktop_seed_dir: Path = _RESOURCE_ROOT / "seed_data" if _IS_FROZEN else (_PROJECT_ROOT / "data")
-
     @model_validator(mode="after")
     def _resolve_paths(self) -> Settings:
-        """确保 data_dir 是绝对路径（环境变量传入的相对路径基于项目根目录解析）。"""
-        if not self.data_dir.is_absolute():
-            # 相对路径基于项目根目录解析，而非 CWD
-            self.data_dir = (_PROJECT_ROOT / self.data_dir).resolve()
-        if not self.local_projects_root.is_absolute():
-            self.local_projects_root = (_PROJECT_ROOT / self.local_projects_root).resolve()
-        if not self.sina_realtime_data_dir.is_absolute():
-            self.sina_realtime_data_dir = (_PROJECT_ROOT / self.sina_realtime_data_dir).resolve()
-        if not self.desktop_seed_dir.is_absolute():
-            self.desktop_seed_dir = (_PROJECT_ROOT / self.desktop_seed_dir).resolve()
+        """把相对路径统一解析到仓库根目录，避免受启动目录影响。"""
+        for field_name in (
+            "data_dir",
+            "tiers_yaml",
+            "static_dir",
+            "local_projects_root",
+            "sina_realtime_data_dir",
+        ):
+            value = getattr(self, field_name)
+            if not value.is_absolute():
+                setattr(self, field_name, (_PROJECT_ROOT / value).resolve())
         return self
 
     @property
     def use_free_mode(self) -> bool:
-        """是否走 Free 模式。优先看 secrets.json,其次看 .env。"""
+        """判断当前是否使用 TickFlow Free 模式。"""
         from app import secrets_store
+
         return not secrets_store.get_tickflow_key()
 
 

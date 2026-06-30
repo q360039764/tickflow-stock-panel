@@ -108,6 +108,12 @@ def _to_float(value: str | None) -> float | None:
         return None
 
 
+def _volume_to_hands(value: str | None) -> float | None:
+    """Sina 成交量字段单位是股，项目内部日 K 统一使用手。"""
+    parsed = _to_float(value)
+    return parsed / 100.0 if parsed is not None else None
+
+
 def _parse_timestamp(date_text: str, time_text: str) -> str | None:
     """将 Sina 日期与时间拼成 ISO 风格字符串。"""
     date_text = str(date_text or "").strip()
@@ -150,7 +156,7 @@ def _parse_sina_line(sina_code: str, fields: str) -> dict | None:
         "open": _to_float(row.get("open")),
         "high": high,
         "low": low,
-        "volume": _to_float(row.get("volume")),
+        "volume": _volume_to_hands(row.get("volume")),
         "amount": _to_float(row.get("amount")),
         "change_amount": change_amount,
         "change_pct": change_pct,

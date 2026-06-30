@@ -111,13 +111,19 @@ class StrategyEngine:
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
 
-        meta = getattr(mod, "META", {})
+        meta = dict(getattr(mod, "META", {}) or {})
+        # 兼容部分 AI 生成器输出的字段别名，统一转为项目策略格式。
+        if meta.get("strategy_id") and not meta.get("id"):
+            meta["id"] = meta["strategy_id"]
+        if meta.get("strategy_name") and not meta.get("name"):
+            meta["name"] = meta["strategy_name"]
         meta.setdefault("id", path.stem)
         meta.setdefault("name", path.stem)
         meta.setdefault("description", "")
         meta.setdefault("tags", [])
-        meta.setdefault("params", [])
-        meta.setdefault("scoring", {})
+        meta["params"] = _normalize_param_defs(meta.get("params", []))
+        if not isinstance(meta.get("scoring"), dict):
+            meta["scoring"] = {}
         meta.setdefault("order_by", "score")
         meta.setdefault("descending", True)
         meta.setdefault("limit", 100)
@@ -138,19 +144,35 @@ class StrategyEngine:
         elif "/ai/" in str(path).replace("\\", "/") or "\\ai\\" in str(path):
             source = "ai"
 
+        entry_signals = getattr(mod, "ENTRY_SIGNALS", None)
+        if entry_signals is None:
+            entry_signals = meta.get("entry_signals", [])
+        exit_signals = getattr(mod, "EXIT_SIGNALS", None)
+        if exit_signals is None:
+            exit_signals = meta.get("exit_signals", [])
+
+        filter_fn = getattr(mod, "filter", None)
+        filter_history_fn = getattr(mod, "filter_history", None)
+        generated_signal_fn = getattr(mod, "generate_signals", None)
+        if generated_signal_fn is None:
+            generated_signal_fn = getattr(mod, "build_strategy", None)
+        if filter_fn is None and filter_history_fn is None and callable(generated_signal_fn):
+            filter_history_fn = _generated_signals_filter_history(generated_signal_fn, entry_signals)
+            entry_signals = []
+
         return StrategyDef(
             meta=meta,
             basic_filter=bf,
-            entry_signals=getattr(mod, "ENTRY_SIGNALS", []),
-            exit_signals=getattr(mod, "EXIT_SIGNALS", []),
+            entry_signals=_normalize_signal_list(entry_signals),
+            exit_signals=_normalize_signal_list(exit_signals),
             stop_loss=getattr(mod, "STOP_LOSS", None),
             trailing_stop=getattr(mod, "TRAILING_STOP", None),
             trailing_take_profit_activate=getattr(mod, "TRAILING_TAKE_PROFIT_ACTIVATE", None),
             trailing_take_profit_drawdown=getattr(mod, "TRAILING_TAKE_PROFIT_DRAWDOWN", None),
             max_hold_days=getattr(mod, "MAX_HOLD_DAYS", None),
             alerts=getattr(mod, "ALERTS", []),
-            filter_fn=getattr(mod, "filter", None),
-            filter_history_fn=getattr(mod, "filter_history", None),
+            filter_fn=filter_fn,
+            filter_history_fn=filter_history_fn,
             lookback_days=int(getattr(mod, "LOOKBACK_DAYS", meta.get("lookback_days", 1)) or 1),
             source=source,
             file_path=path,
@@ -227,6 +249,10 @@ class StrategyEngine:
                 return StrategyResult(as_of=as_of, strategy_id=strategy_id)
             if "date" in df.columns:
                 df = df.filter(pl.col("date") == as_of)
+            if s.entry_signals:
+                entry_expr = _signal_mask_expr(df, s.entry_signals)
+                if entry_expr is not None:
+                    df = df.filter(entry_expr)
         elif precomputed is not None and not precomputed.is_empty():
             df = precomputed
         else:
@@ -451,3 +477,100 @@ def _sanitize(rows: list[dict]) -> list[dict]:
 def _dict_hash(d: dict) -> str:
     """用于 basic_filter 分组缓存"""
     return str(sorted(d.items()))
+
+
+def _normalize_signal_list(value: Any) -> list[str]:
+    """将策略信号配置规范化为非空字符串列表。"""
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if item]
+
+
+def _signal_mask_expr(df: pl.DataFrame, signals: list[str]) -> pl.Expr | None:
+    """把策略信号配置转换为 DataFrame 可执行的布尔表达式。"""
+    masks: list[pl.Expr] = []
+    for sig in signals:
+        col = sig if (sig.startswith("signal_") or sig.startswith("csg_")) else f"signal_{sig}"
+        if col in df.columns:
+            masks.append(pl.col(col).fill_null(False).cast(pl.Boolean))
+    if not masks:
+        return None
+    expr = masks[0]
+    for mask in masks[1:]:
+        expr = expr | mask
+    return expr
+
+
+def _infer_param_type(value: Any) -> str:
+    """根据默认值推断前端参数控件类型。"""
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    return "select" if isinstance(value, str) else "float"
+
+
+def _normalize_param_defs(value: Any) -> list[dict]:
+    """兼容 AI 输出的 dict 型 params，并统一为前端和回测可用的参数定义列表。"""
+    if isinstance(value, dict):
+        result = []
+        for key, default in value.items():
+            param_def = {
+                "id": str(key),
+                "label": str(key),
+                "type": _infer_param_type(default),
+                "default": default,
+            }
+            if param_def["type"] == "select":
+                param_def["options"] = [str(default)]
+            result.append(param_def)
+        return result
+    if not isinstance(value, list):
+        return []
+
+    result = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        pid = item.get("id")
+        if not pid:
+            continue
+        normalized = dict(item)
+        normalized["id"] = str(pid)
+        normalized.setdefault("label", str(pid))
+        normalized.setdefault("default", None)
+        normalized.setdefault("type", _infer_param_type(normalized.get("default")))
+        result.append(normalized)
+    return result
+
+
+def _generated_signals_filter_history(
+    signal_fn: Callable[[pl.DataFrame], pl.DataFrame],
+    entry_signals: list[str],
+) -> Callable[[pl.DataFrame, dict], pl.DataFrame]:
+    """把 AI 生成的信号表函数包装为回测候选过滤函数。"""
+    signal_cols = _normalize_signal_list(entry_signals)
+
+    def _filter_history(df: pl.DataFrame, params: dict) -> pl.DataFrame:  # noqa: ARG001
+        if df.is_empty():
+            return df
+        generated = signal_fn(df)
+        if generated is None or generated.is_empty():
+            return df.head(0)
+        if not signal_cols:
+            return generated
+        masks: list[pl.Expr] = []
+        for sig in signal_cols:
+            col = sig if sig in generated.columns else f"signal_{sig}"
+            if col in generated.columns:
+                masks.append(pl.col(col).fill_null(False).cast(pl.Boolean))
+        if not masks:
+            return generated.head(0)
+        expr = masks[0]
+        for mask in masks[1:]:
+            expr = expr | mask
+        return generated.filter(expr)
+
+    return _filter_history

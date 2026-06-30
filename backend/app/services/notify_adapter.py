@@ -101,7 +101,7 @@ def _notify_winotify(title: str, message: str) -> bool:
         msg=message,
         # winotify 要求 duration 为 "short" 或 "long"
         duration="short",
-        # 无可点击动作 (桌面版不实现"点击回到窗口"的复杂交互)
+        # 无可点击动作，系统通知仅作为告警辅助通道。
     ).show()
     return True
 

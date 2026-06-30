@@ -138,7 +138,12 @@ export function Data() {
 
   const syncIndexDaily = useMutation({
     mutationFn: () => api.syncIndexDaily(indexSyncDays),
-    onSuccess: () => {
+    onSuccess: (data) => {
+      if (data?.job_id) {
+        setActiveJobId(data.job_id)
+        startTime.current = Date.now()
+      }
+      qc.invalidateQueries({ queryKey: QK.pipelineJobs })
       qc.invalidateQueries({ queryKey: QK.dataStatus })
       qc.invalidateQueries({ queryKey: QK.indexList })
       qc.invalidateQueries({ queryKey: QK.indexQuotes })

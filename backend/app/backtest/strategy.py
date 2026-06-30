@@ -152,6 +152,17 @@ class StrategyBacktestService:
             return _err("正式回测区间内无数据")
 
         t_signal = time.perf_counter()
+        history_frame: pl.DataFrame | None = None
+        history_frame_loaded = False
+        history_failed = False
+        if s.filter_history_fn:
+            history_frame_loaded = True
+            try:
+                history_frame = s.filter_history_fn(panel, params)
+                panel = self._merge_generated_signal_columns(panel, history_frame)
+            except Exception as e:  # noqa: BLE001
+                history_failed = True
+                logger.warning("strategy filter_history_fn failed: %s", e)
 
         # basic_filter 只影响买入候选, 不能删除行情 panel, 否则持仓 mark / 卖出 / full forward return 都会失真。
         basic_mask = pl.Series("_basic", [True] * len(panel), dtype=pl.Boolean)
@@ -165,7 +176,15 @@ class StrategyBacktestService:
                     return _err(f"基础过滤计算失败: {e}")
 
         # 策略候选层用于评分归一化；entry_signals 只是买点层, 不参与 score universe。
-        candidate_filter_mask = self._build_candidate_filter_mask(panel, s, params)
+        candidate_filter_mask = self._build_candidate_filter_mask(
+            panel,
+            s,
+            params,
+            entry_signals,
+            history_frame=history_frame,
+            history_frame_loaded=history_frame_loaded,
+            history_failed=history_failed,
+        )
         candidate_mask = basic_mask & candidate_filter_mask
         panel = self._apply_score(panel, s, overrides, universe_mask=candidate_mask)
 
@@ -403,33 +422,25 @@ class StrategyBacktestService:
         panel: pl.DataFrame,
         s: StrategyDef,
         params: dict,
+        entry_signals: list[str] | None = None,
+        history_frame: pl.DataFrame | None = None,
+        history_frame_loaded: bool = False,
+        history_failed: bool = False,
     ) -> pl.Series:
         """生成策略候选层 mask。filter_history/filter 决定候选池, 不包含 entry_signals。"""
         false_mask = pl.Series("_candidate_filter", [False] * len(panel), dtype=pl.Boolean)
         true_mask = pl.Series("_candidate_filter", [True] * len(panel), dtype=pl.Boolean)
 
-        history_failed = False
         # 优先: filter_history_fn 策略 (涨停/反包等多日形态, 与选股路径共用同一逻辑)
         if s.filter_history_fn:
-            try:
-                hit_df = s.filter_history_fn(panel, params)
-                if hit_df is None or hit_df.is_empty():
-                    return false_mask
-                # 命中行 (symbol,date) → 转 panel 等长布尔 mask
-                hits = hit_df.select(["symbol", "date"]).unique()
-                marked = (
-                    panel.select(["symbol", "date"])
-                    .join(
-                        hits.with_columns(pl.lit(True).alias("_hit")),
-                        on=["symbol", "date"],
-                        how="left",
-                    )
-                )
-                return marked["_hit"].fill_null(False).cast(pl.Boolean)
-            except Exception as e:
-                history_failed = True
-                logger.warning("strategy filter_history_fn failed: %s", e)
-                # 失败则回退到 filter_fn (若存在)
+            if not history_failed:
+                try:
+                    hit_df = history_frame if history_frame_loaded else s.filter_history_fn(panel, params)
+                    return self._history_hits_to_mask(panel, hit_df, entry_signals or [])
+                except Exception as e:
+                    history_failed = True
+                    logger.warning("strategy filter_history_fn failed: %s", e)
+                    # 失败则回退到 filter_fn (若存在)
 
         # 策略 filter_fn: 候选层 (filter_history 不可用或失败时)
         if s.filter_fn:
@@ -472,18 +483,25 @@ class StrategyBacktestService:
         entry_signals: list[str],
     ) -> pl.Series:
         """兼容旧调用: 候选层 AND 买点层。"""
-        candidate_mask = self._build_candidate_filter_mask(panel, s, params)
+        candidate_mask = self._build_candidate_filter_mask(panel, s, params, entry_signals)
         return self._build_entry_mask_from_candidate(panel, candidate_mask, s, entry_signals)
+
+    @staticmethod
+    def _resolve_signal_columns(panel: pl.DataFrame, signals: list[str]) -> list[str]:
+        """把信号名解析为当前 DataFrame 中真实存在的列名。"""
+        cols: list[str] = []
+        for sig in signals:
+            col = sig if (sig.startswith("signal_") or sig.startswith("csg_")) else f"signal_{sig}"
+            if col in panel.columns:
+                cols.append(col)
+        return cols
 
     @staticmethod
     def _build_signal_mask(panel: pl.DataFrame, signals: list[str], name: str) -> pl.Series:
         """向量化合并信号列，多个信号 OR。支持内置 signal_ 与自定义 csg_ 前缀。"""
         masks: list[pl.Series] = []
-        for sig in signals:
-            # csg_ (自定义信号) 直接用；否则按 signal_ 解析
-            col = sig if (sig.startswith("signal_") or sig.startswith("csg_")) else f"signal_{sig}"
-            if col in panel.columns:
-                masks.append(panel[col].fill_null(False).cast(pl.Boolean))
+        for col in StrategyBacktestService._resolve_signal_columns(panel, signals):
+            masks.append(panel[col].fill_null(False).cast(pl.Boolean))
 
         if not masks:
             return pl.Series(name, [False] * len(panel), dtype=pl.Boolean)
@@ -492,6 +510,68 @@ class StrategyBacktestService:
         for m in masks[1:]:
             combined = combined | m
         return combined
+
+    @staticmethod
+    def _history_hits_to_mask(
+        panel: pl.DataFrame,
+        hit_df: pl.DataFrame | None,
+        entry_signals: list[str],
+    ) -> pl.Series:
+        """把 filter_history 命中行转换为行情面板等长候选 mask。"""
+        false_mask = pl.Series("_candidate_filter", [False] * len(panel), dtype=pl.Boolean)
+        if hit_df is None or hit_df.is_empty():
+            return false_mask
+        if "symbol" not in hit_df.columns or "date" not in hit_df.columns:
+            return false_mask
+
+        # 历史策略可能同时生成买入和卖出行；候选池只保留买入信号命中行。
+        entry_cols = StrategyBacktestService._resolve_signal_columns(hit_df, entry_signals)
+        if entry_cols:
+            entry_mask = StrategyBacktestService._build_signal_mask(hit_df, entry_signals, "_history_entry")
+            hit_df = hit_df.filter(entry_mask)
+            if hit_df.is_empty():
+                return false_mask
+
+        hits = hit_df.select(["symbol", "date"]).unique()
+        marked = (
+            panel.select(["symbol", "date"])
+            .join(
+                hits.with_columns(pl.lit(True).alias("_hit")),
+                on=["symbol", "date"],
+                how="left",
+            )
+        )
+        return marked["_hit"].fill_null(False).cast(pl.Boolean)
+
+    @staticmethod
+    def _merge_generated_signal_columns(panel: pl.DataFrame, generated: pl.DataFrame | None) -> pl.DataFrame:
+        """合并 filter_history 生成的新信号列，供回测买卖点读取。"""
+        if generated is None or generated.is_empty():
+            return panel
+        if "symbol" not in generated.columns or "date" not in generated.columns:
+            return panel
+
+        signal_cols = [
+            c for c in generated.columns
+            if (c.startswith("signal_") or c.startswith("csg_")) and c not in panel.columns
+        ]
+        if not signal_cols:
+            return panel
+
+        signals = (
+            generated
+            .select(["symbol", "date", *signal_cols])
+            .with_columns([
+                pl.col(c).fill_null(False).cast(pl.Boolean, strict=False).alias(c)
+                for c in signal_cols
+            ])
+            .group_by(["symbol", "date"])
+            .agg([pl.col(c).any().alias(c) for c in signal_cols])
+        )
+        return panel.join(signals, on=["symbol", "date"], how="left").with_columns([
+            pl.col(c).fill_null(False).cast(pl.Boolean, strict=False).alias(c)
+            for c in signal_cols
+        ])
 
     def _build_benchmark_curve(self, start: date, end: date) -> list[dict]:
         try:
@@ -575,6 +655,8 @@ class StrategyBacktestService:
     def _normalize_params(params: dict, s: StrategyDef) -> dict:
         normalized = dict(params)
         for param in s.meta.get("params", []):
+            if not isinstance(param, dict):
+                continue
             pid = param.get("id")
             if not pid:
                 continue
