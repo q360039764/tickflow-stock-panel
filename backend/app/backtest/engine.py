@@ -183,6 +183,8 @@ class BacktestEngine:
             if self.repo is not None and hasattr(self.repo, "get_enriched_range"):
                 cached = self.repo.get_enriched_range(start, end, symbols=symbols, columns=columns)
                 if cached is not None and not cached.is_empty():
+                    if columns is None:
+                        cached = self._ensure_strategy_columns(cached)
                     elapsed = (time.perf_counter() - t0) * 1000
                     logger.info("load_panel(cache): %.0fms, %d rows, %d columns", elapsed, len(cached), len(cached.columns))
                     return cached
@@ -226,18 +228,48 @@ class BacktestEngine:
         from app.indicators.pipeline import compute_all
         instruments = self.repo.get_instruments()
         df = compute_all(df, instruments=instruments)
-        if not instruments.is_empty() and "name" not in df.columns:
-            inst_cols = [c for c in ["symbol", "name"] if c in instruments.columns]
-            if len(inst_cols) == 2:
-                df = df.join(
-                    instruments.select(inst_cols).unique(subset=["symbol"]),
-                    on="symbol",
-                    how="left",
-                )
+        df = self._ensure_strategy_columns(df, instruments)
 
         elapsed = (time.perf_counter() - t0) * 1000
         logger.info("load_panel: %.0fms, %d rows", elapsed, len(df))
         return df
+
+    def _ensure_strategy_columns(
+        self,
+        panel: pl.DataFrame,
+        instruments: pl.DataFrame | None = None,
+    ) -> pl.DataFrame:
+        """补齐策略回测依赖的涨跌停、换手率和证券基础字段。"""
+        if panel.is_empty() or self.repo is None:
+            return panel
+
+        if instruments is None:
+            instruments = self.repo.get_instruments()
+        if instruments is None or instruments.is_empty():
+            return panel
+
+        turnover_missing = (
+            "turnover_rate" not in panel.columns
+            or panel["turnover_rate"].null_count() == len(panel)
+        )
+        required_limit_cols = {"signal_limit_up", "signal_limit_down", "consecutive_limit_ups"}
+        if turnover_missing or not required_limit_cols.issubset(panel.columns):
+            from app.indicators.pipeline import compute_limit_signals
+
+            panel = compute_limit_signals(panel, instruments)
+
+        # 基础过滤和结果展示需要名称、总股本及流通股本。
+        inst_cols = [
+            c for c in ["name", "total_shares", "float_shares"]
+            if c in instruments.columns and c not in panel.columns
+        ]
+        if inst_cols:
+            panel = panel.join(
+                instruments.select(["symbol", *inst_cols]).unique(subset=["symbol"]),
+                on="symbol",
+                how="left",
+            )
+        return panel
 
     # ── 撮合模拟 ──────────────────────────────────────
 

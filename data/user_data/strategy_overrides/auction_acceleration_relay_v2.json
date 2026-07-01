@@ -1,0 +1,37 @@
+{
+  "name": "竞价加速接力模型2.0（小微盘）",
+  "description": "自由流通市值小于28亿元，过滤高换手承接断裂后的小微盘竞价加速接力模型",
+  "basic_filter": {
+    "enabled": true
+  },
+  "params": {
+    "min_recent_gain": 15,
+    "min_open_gap": 2,
+    "max_open_gap": 8.5,
+    "min_vol_ratio": 0.5,
+    "max_vol_ratio": 3,
+    "min_turnover": 2,
+    "max_turnover": 12,
+    "min_close_strength": 0.65,
+    "min_market_limit_up_count": 0,
+    "min_next_open_gap": 3,
+    "min_next_close_strength": 0.7
+  },
+  "scoring": {
+    "momentum_10d": 0.35,
+    "consecutive_limit_ups": 0.3,
+    "change_pct": 0.2,
+    "amount": 0.15
+  },
+  "stop_loss": -0.06,
+  "max_hold_days": 3,
+  "entry_signals": [
+    "signal_entry_auction_acceleration_relay_v2"
+  ],
+  "exit_signals": [
+    "signal_exit_next_day_not_accelerating_v2",
+    "signal_exit_acceleration_break_v2",
+    "signal_ma20_breakdown"
+  ],
+  "display_limit": null
+}
